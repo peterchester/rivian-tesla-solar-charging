@@ -1,0 +1,24 @@
+# Credentials and tokens (never commit these)
+config.json
+tesla_token.json
+rivian_session.json
+
+# Runtime state
+charge_state.json
+
+# Logs
+solar_charge.log
+solar_charge_stdout.log
+solar_charge_stderr.log
+solar_charge_cron.log
+*.log
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
