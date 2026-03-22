@@ -1,6 +1,6 @@
-# Solar Charge Controller for a Rivian Vehicle and a Tesla Powerwall 3
+# Solar Charge Controller for Rivian + Tesla Powerwall 3
 
-A PHP script created using claude.ai that monitors your Tesla Powerwall 3's solar production via the Tesla cloud API and dynamically adjusts your Rivian's charging amperage so the truck only charges when you have surplus solar energy. No grid power wasted on charging.
+A PHP script that monitors your Tesla Powerwall 3's solar production via the Tesla cloud API and dynamically adjusts your Rivian's charging amperage so the vehicle only charges when you have surplus solar energy. No grid power wasted on charging.
 
 ## How It Works
 
@@ -15,7 +15,7 @@ A PHP script created using claude.ai that monitors your Tesla Powerwall 3's sola
 
 - PHP 8.0+ with the `curl` extension
 - Tesla account with a Powerwall 3 (or any Tesla solar/energy product accessible via the Owners API)
-- Rivian account with a vehicle.
+- Rivian account with a registered vehicle
 - macOS, Linux, or any system that can run PHP CLI
 
 ## Quick Start
@@ -183,6 +183,11 @@ The Wall Charger's dip switches set the hardware ceiling (e.g., 48A on a 60A cir
 - The script does not wake the Rivian vehicle; charging schedules are managed server-side
 - Credentials are stored in plain text in `config.json`; protect this file appropriately
 
+## Authors
+
+- **Peter Chester** ([@peterchester](https://github.com/peterchester))
+- **Claude** ([Anthropic](https://www.anthropic.com)) - AI pair programmer
+
 ## License
 
-MIT
+MIT - See [LICENSE](LICENSE) for details.
