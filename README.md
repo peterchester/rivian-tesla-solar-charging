@@ -4,12 +4,13 @@ A PHP script that monitors your Tesla Powerwall 3's solar production via the Tes
 
 ## How It Works
 
-1. Polls the Tesla cloud API every 5 minutes for real-time solar production, grid import/export, battery charge level, and home consumption
-2. Calculates how much surplus solar is available (energy being exported to the grid)
-3. Prioritizes your Powerwall: the truck won't charge until the battery is above a configurable threshold (default 90%)
+1. Checks the Rivian vehicle's battery level and charge limit for override conditions (low battery or trip mode)
+2. Polls the Tesla cloud API every 5 minutes for real-time solar production, grid import/export, Powerwall charge level, and home consumption
+3. Calculates available surplus from two sources: energy being exported to the grid, plus energy flowing into the Powerwall (once above the configurable threshold, the Powerwall's charge rate is shared with the vehicle)
 4. Converts surplus watts to amps and updates the Rivian's charging schedule via the unofficial Rivian GraphQL API
-5. If surplus drops below the minimum threshold, charging is disabled
+5. If surplus drops below the minimum threshold, blocks charging by setting an expired schedule window on the vehicle
 6. Scales amperage dynamically: more sun = faster charging, less sun = slower or no charging
+7. Overrides solar-only mode when the Rivian's battery is critically low, or when you signal a trip by raising the charge limit in the Rivian app
 
 ## Requirements
 
@@ -123,10 +124,12 @@ After running the setup commands, `config.json` will look something like this:
     "charging": {
         "home_latitude": 37.1234,
         "home_longitude": -122.5678,
-        "min_solar_watts": 1200,
+        "min_solar_watts": 600,
         "min_amps": 8,
         "max_amps": 48,
-        "battery_soe_threshold": 90,
+        "powerwall_min_battery_pct": 20,
+        "rivian_min_battery_pct": 20,
+        "rivian_full_charge_limit_pct": 85,
         "poll_interval_seconds": 300,
         "week_days": ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
     }
@@ -137,11 +140,21 @@ After running the setup commands, `config.json` will look something like this:
 
 | Parameter | Default | Description |
 |---|---|---|
-| `min_solar_watts` | 1200 | Minimum surplus watts before charging starts (~5A at 240V) |
+| `min_solar_watts` | 600 | Minimum surplus watts before charging starts |
 | `min_amps` | 8 | Minimum amperage to send to the vehicle |
-| `max_amps` | 48 | Maximum amperage (should match your Wall Charger's dip switch setting) |
-| `battery_soe_threshold` | 90 | Powerwall must be above this % before truck gets any solar |
+| `max_amps` | 48 | Maximum amperage (should match your charger's hardware limit) |
+| `powerwall_min_battery_pct` | 20 | Powerwall must be above this % before sharing its charge rate with the vehicle |
+| `rivian_min_battery_pct` | 20 | If the Rivian battery is below this %, charge at full power regardless of solar |
+| `rivian_full_charge_limit_pct` | 85 | If the Rivian's charge limit is set at or above this %, charge at full power (trip mode) |
 | `poll_interval_seconds` | 300 | How often to check solar production (daemon mode) |
+
+### Override behaviors
+
+The script supports two overrides that bypass solar-only charging:
+
+**Low battery protection**: If your Rivian's battery drops below `rivian_min_battery_pct` (default 20%), the script charges at full power until the battery is above the threshold. This prevents your vehicle from sitting dead in the driveway on a cloudy week.
+
+**Trip mode**: If you set your Rivian's charge limit to a value at or above `rivian_full_charge_limit_pct` (default 85%), the script charges at full power regardless of solar conditions. This gives you a simple way to signal "I need a full charge for a trip" just by adjusting the charge limit in the Rivian app. When you're back to normal daily driving, set your charge limit back below the threshold (e.g. 70%) and the script returns to solar-only mode.
 
 ## Commands
 
@@ -165,9 +178,11 @@ After running the setup commands, `config.json` will look something like this:
 
 ## How Charging Control Works
 
-The script doesn't directly talk to the Rivian Wall Charger. Instead, it uses Rivian's `SetChargingSchedule` GraphQL mutation to set the amperage on the vehicle itself. The truck's onboard charger then draws up to that amount from whatever EVSE it's plugged into. This works with the Rivian Wall Charger, a third-party J1772 EVSE, or the portable charger.
+The script controls charging by manipulating the Rivian's charging schedule via the GraphQL API. To enable charging, it sets a schedule that spans the full day at the calculated amperage. To block charging, it sets an enabled schedule with an expired 1-minute window, which puts the vehicle into "outside scheduled window" state and prevents it from drawing power.
 
-The Wall Charger's dip switches set the hardware ceiling (e.g., 48A on a 60A circuit), and the vehicle software throttles below that based on the schedule.
+The vehicle's onboard charger controls the actual draw, so this works with the Rivian Wall Charger, a third-party J1772 EVSE, or the portable charger. The Wall Charger's dip switches (or EVSE rating) set the hardware ceiling, and the vehicle software throttles below that based on the schedule.
+
+Surplus solar is calculated from two sources: energy being exported to the grid (wasted energy), plus energy flowing into the Powerwall when it's above the configured threshold. This means the Powerwall and vehicle share solar production rather than the Powerwall monopolizing it. The Powerwall's own charge controller naturally absorbs whatever the vehicle doesn't use.
 
 ## Session Management
 

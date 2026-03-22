@@ -5,21 +5,22 @@
  *
  * Monitors your Tesla Powerwall 3's solar production and surplus energy
  * via the Tesla cloud API, then dynamically adjusts your Rivian's
- * charging amperage through the Rivian Wall Charger so the truck only
- * charges when the sun is producing adequate power.
+ * charging amperage so the vehicle only charges when the sun is
+ * producing adequate power.
  *
  * How it works:
- *   1. Polls the Tesla cloud API for solar production, grid export, battery state
- *   2. Calculates surplus solar (energy going to grid that could charge the truck)
- *   3. Converts surplus watts to amps and updates the Rivian charging schedule
- *   4. If surplus is below the minimum threshold, disables charging
- *   5. Prioritizes home battery: won't divert solar until Powerwall is above threshold
+ *   1. Checks Rivian vehicle battery level and charge limit for override conditions
+ *   2. Polls the Tesla cloud API for solar production, grid export, battery state
+ *   3. Calculates surplus solar (grid export + Powerwall charge rate when above threshold)
+ *   4. Converts surplus watts to amps and updates the Rivian charging schedule
+ *   5. If surplus is below the minimum threshold, blocks charging via expired schedule window
+ *   6. Prioritizes home battery: won't share Powerwall charge with vehicle until above threshold
+ *   7. Overrides solar-only mode if vehicle battery is critically low or trip mode is triggered
  *
  * Requirements:
  *   - PHP 8.0+ with curl extension
  *   - Tesla account (for Powerwall 3 cloud API access)
  *   - Rivian account credentials
- *   - Rivian Wall Charger registered to your account
  *
  * Initial Setup:
  *   1. Generate config:       php solar_charge.php
@@ -109,10 +110,12 @@ function loadConfig(): array
             'charging' => [
                 'home_latitude'      => 37.0000,
                 'home_longitude'     => -122.0000,
-                'min_solar_watts'    => 1200,
+                'min_solar_watts'    => 600,
                 'min_amps'           => 8,
                 'max_amps'           => 48,
-                'battery_soe_threshold' => 90,
+                'powerwall_min_battery_pct' => 20,
+                'rivian_min_battery_pct' => 20,
+                'rivian_full_charge_limit_pct' => 85,
                 'poll_interval_seconds' => 300,
                 'week_days' => ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'],
             ],
@@ -602,10 +605,24 @@ function rivianSetChargingSchedule(
     float  $lng,
     array  $weekDays
 ): bool {
-    // Start immediately (current time of day as minutes after midnight)
-    $now        = new DateTime();
-    $startTime  = (int) $now->format('G') * 60 + (int) $now->format('i');
-    $duration   = 1440; // 24 hours, effectively "always on when conditions met"
+    if ($enabled) {
+        // When enabled: set a schedule that covers the full day at the desired amperage.
+        // Start at midnight (0), duration 1440 minutes (24 hours).
+        $startTime = 0;
+        $duration  = 1440;
+        $scheduleEnabled = true;
+        $scheduleAmps = $amperage;
+    } else {
+        // When disabled: set an enabled schedule with a 1-minute window starting at
+        // 1 minute past midnight (time that has almost certainly already passed today).
+        // This forces the vehicle into "outside scheduled window" state, which
+        // actually prevents charging. Simply setting enabled=false on the schedule
+        // just removes the schedule, allowing the vehicle to charge freely.
+        $startTime = 1;
+        $duration  = 1;
+        $scheduleEnabled = true;
+        $scheduleAmps = $amperage > 0 ? $amperage : 8;
+    }
 
     $payload = [
         'operationName' => 'SetChargingSchedule',
@@ -619,8 +636,8 @@ function rivianSetChargingSchedule(
                     'latitude'  => $lat,
                     'longitude' => $lng,
                 ],
-                'amperage' => $amperage,
-                'enabled'  => $enabled,
+                'amperage' => $scheduleAmps,
+                'enabled'  => $scheduleEnabled,
             ]],
         ],
         'query' => 'mutation SetChargingSchedule($vehicleId: String!, $chargingSchedules: [InputChargingSchedule!]!) { setChargingSchedules(vehicleId: $vehicleId, chargingSchedules: $chargingSchedules) { success } }',
@@ -630,7 +647,11 @@ function rivianSetChargingSchedule(
     $success = $result['data']['setChargingSchedules']['success'] ?? false;
 
     if ($success) {
-        logMsg('INFO', "Charging schedule updated: {$amperage}A, enabled=" . ($enabled ? 'true' : 'false'));
+        if ($enabled) {
+            logMsg('INFO', "Charging schedule: ENABLED at {$amperage}A (all day)");
+        } else {
+            logMsg('INFO', "Charging schedule: BLOCKED (schedule window expired, vehicle will not charge)");
+        }
     } else {
         logMsg('ERROR', "Failed to update charging schedule: " . json_encode($result));
     }
@@ -706,6 +727,34 @@ function rivianGetLiveSession(array $session, string $vehicleId): ?array
     return $data['data']['getLiveSessionData'] ?? null;
 }
 
+/**
+ * Get Rivian vehicle battery level and charge limit.
+ * Uses a minimal query to avoid waking the vehicle unnecessarily.
+ */
+function rivianGetVehicleBattery(array $session, string $vehicleId): ?array
+{
+    $payload = [
+        'operationName' => 'GetVehicleState',
+        'variables'     => ['vehicleID' => $vehicleId],
+        'query'         => 'query GetVehicleState($vehicleID: String!) { vehicleState(id: $vehicleID) { __typename batteryLevel { __typename timeStamp value } batteryLimit { __typename timeStamp value } chargerState { __typename timeStamp value } chargerStatus { __typename timeStamp value } } }',
+    ];
+
+    $result = rivianGraphQL($session, $payload);
+    $state = $result['data']['vehicleState'] ?? null;
+
+    if (!$state) {
+        logMsg('ERROR', "Failed to fetch Rivian vehicle state");
+        return null;
+    }
+
+    return [
+        'battery_level' => (float) ($state['batteryLevel']['value'] ?? 0),
+        'battery_limit' => (float) ($state['batteryLimit']['value'] ?? 70),
+        'charger_state' => $state['chargerState']['value'] ?? 'unknown',
+        'charger_status' => $state['chargerStatus']['value'] ?? 'unknown',
+    ];
+}
+
 // ===========================================================================
 // CHARGE STATE PERSISTENCE
 // ===========================================================================
@@ -733,7 +782,7 @@ function calculateTargetAmps(array $meters, float $batterySoe, array $chargingCo
 {
     $solarW    = $meters['solar_w'];
     $gridW     = $meters['grid_w'];   // negative = exporting to grid
-    $batteryW  = $meters['battery_w'];
+    $batteryW  = $meters['battery_w']; // negative = Powerwall is charging
     $loadW     = $meters['load_w'];
 
     logMsg('INFO', sprintf(
@@ -741,30 +790,39 @@ function calculateTargetAmps(array $meters, float $batterySoe, array $chargingCo
         $solarW, $gridW, $batteryW, $batterySoe, $loadW
     ));
 
-    // If battery is below threshold, let solar charge the battery first
-    if ($batterySoe < $chargingConfig['battery_soe_threshold']) {
+    // If Powerwall is below threshold, all solar goes to the battery first
+    if ($batterySoe < $chargingConfig['powerwall_min_battery_pct']) {
         logMsg('INFO', sprintf(
-            "Battery at %.1f%% (threshold: %d%%), prioritizing battery charging",
-            $batterySoe, $chargingConfig['battery_soe_threshold']
+            "Powerwall at %.1f%% (threshold: %d%%), prioritizing battery charging",
+            $batterySoe, $chargingConfig['powerwall_min_battery_pct']
         ));
         return 0;
     }
 
-    // Surplus is the energy being exported to the grid (negative grid_w means export).
-    // We also consider any solar going to the battery once it's above threshold.
+    // Calculate available surplus from two sources:
+    //
+    // 1. Grid export: energy leaving the house unused (negative grid_w)
+    // 2. Powerwall charge rate: once the Powerwall is above the threshold,
+    //    the energy flowing into it can be shared with the vehicle. The
+    //    Powerwall will naturally absorb whatever the vehicle doesn't use.
     $surplusW = 0;
 
+    // Energy being exported to the grid is clearly available
     if ($gridW < 0) {
-        // We're exporting to grid, this is available surplus
         $surplusW += abs($gridW);
     }
 
-    // If battery is full and still absorbing power, that's also available
-    if ($batterySoe >= 99 && $batteryW < 0) {
+    // Energy flowing into the Powerwall is shareable once above threshold
+    if ($batteryW < 0) {
         $surplusW += abs($batteryW);
     }
 
-    logMsg('INFO', "Available surplus: {$surplusW}W");
+    logMsg('INFO', sprintf(
+        "Available surplus: %.0fW (grid export: %.0fW + battery share: %.0fW)",
+        $surplusW,
+        $gridW < 0 ? abs($gridW) : 0,
+        $batteryW < 0 ? abs($batteryW) : 0
+    ));
 
     // Not enough surplus solar
     if ($surplusW < $chargingConfig['min_solar_watts']) {
@@ -789,39 +847,7 @@ function runOnce(array $config): void
     $rivConfig   = $config['rivian'];
     $chgConfig   = $config['charging'];
 
-    // ---- Tesla Cloud Data ----
-    $teslaToken = teslaLoadToken();
-    if (!$teslaToken) {
-        // Try refreshing with the config's refresh token
-        $teslaToken = teslaRefreshToken($teslaConfig['refresh_token']);
-        if (!$teslaToken) {
-            logMsg('ERROR', "Cannot authenticate with Tesla API. Run --tesla-setup.");
-            return;
-        }
-    }
-
-    $liveData = teslaGetLiveStatus($teslaToken['access_token'], $teslaConfig['site_id']);
-    if (!$liveData) {
-        logMsg('ERROR', "Cannot read Tesla energy data, skipping this cycle");
-        return;
-    }
-
-    $meters     = $liveData;
-    $batterySoe = $liveData['battery_pct'];
-
-    // ---- Calculate Target ----
-    $targetAmps = calculateTargetAmps($meters, $batterySoe, $chgConfig);
-    $shouldCharge = $targetAmps > 0;
-
-    // ---- Check if update is needed ----
-    $state = loadChargeState();
-
-    if ($state['last_amps'] === $targetAmps && $state['charging_enabled'] === $shouldCharge) {
-        logMsg('INFO', "No change needed (currently {$targetAmps}A, " . ($shouldCharge ? 'enabled' : 'disabled') . ")");
-        return;
-    }
-
-    // ---- Rivian Session ----
+    // ---- Rivian Session (needed for vehicle state and charging schedule) ----
     $session = rivianLoadSession();
     if (!$session) {
         logMsg('INFO', "No valid Rivian session found, authenticating...");
@@ -830,6 +856,87 @@ function runOnce(array $config): void
             logMsg('ERROR', "Rivian authentication failed. Run with --rivian-setup for interactive login.");
             return;
         }
+    }
+
+    // ---- Check Rivian vehicle battery state ----
+    $vehicleBattery = rivianGetVehicleBattery($session, $rivConfig['vehicle_id']);
+    $forceFullCharge = false;
+    $forceReason = '';
+
+    if ($vehicleBattery) {
+        $rivBatteryLevel = $vehicleBattery['battery_level'];
+        $rivBatteryLimit = $vehicleBattery['battery_limit'];
+        $rivChargerState = $vehicleBattery['charger_state'];
+
+        logMsg('INFO', sprintf(
+            "Rivian: battery=%.1f%%, limit=%.0f%%, charger=%s",
+            $rivBatteryLevel, $rivBatteryLimit, $rivChargerState
+        ));
+
+        // Check 1: Battery below minimum threshold, force charge
+        $minBatteryPct = $chgConfig['rivian_min_battery_pct'] ?? 20;
+        if ($rivBatteryLevel < $minBatteryPct) {
+            $forceFullCharge = true;
+            $forceReason = sprintf(
+                "Rivian battery at %.1f%% is below minimum threshold of %d%%",
+                $rivBatteryLevel, $minBatteryPct
+            );
+        }
+
+        // Check 2: Charge limit set at or above the full-charge trigger
+        $fullChargeLimitPct = $chgConfig['rivian_full_charge_limit_pct'] ?? 85;
+        if (!$forceFullCharge && $rivBatteryLimit >= $fullChargeLimitPct) {
+            $forceFullCharge = true;
+            $forceReason = sprintf(
+                "Rivian charge limit set to %.0f%% (at or above %d%% trigger)",
+                $rivBatteryLimit, $fullChargeLimitPct
+            );
+        }
+    } else {
+        logMsg('INFO', "Could not fetch Rivian battery state, proceeding with solar-only logic");
+    }
+
+    // ---- If forced full charge, skip solar calculation ----
+    if ($forceFullCharge) {
+        logMsg('INFO', "FORCE CHARGE: $forceReason");
+        $targetAmps = $chgConfig['max_amps'];
+        $shouldCharge = true;
+    } else {
+        // ---- Tesla Cloud Data ----
+        $teslaToken = teslaLoadToken();
+        if (!$teslaToken) {
+            $teslaToken = teslaRefreshToken($teslaConfig['refresh_token']);
+            if (!$teslaToken) {
+                logMsg('ERROR', "Cannot authenticate with Tesla API. Run --tesla-setup.");
+                return;
+            }
+        }
+
+        $liveData = teslaGetLiveStatus($teslaToken['access_token'], $teslaConfig['site_id']);
+        if (!$liveData) {
+            logMsg('ERROR', "Cannot read Tesla energy data, skipping this cycle");
+            return;
+        }
+
+        $meters     = $liveData;
+        $batterySoe = $liveData['battery_pct'];
+
+        // ---- Calculate Target from solar surplus ----
+        $targetAmps = calculateTargetAmps($meters, $batterySoe, $chgConfig);
+        $shouldCharge = $targetAmps > 0;
+    }
+
+    // ---- Check if update is needed ----
+    $state = loadChargeState();
+    $isFirstRun = ($state['last_update'] === 0);
+
+    if (!$isFirstRun && $state['last_amps'] === $targetAmps && $state['charging_enabled'] === $shouldCharge) {
+        logMsg('INFO', "No change needed (currently {$targetAmps}A, " . ($shouldCharge ? 'enabled' : 'disabled') . ")");
+        return;
+    }
+
+    if ($isFirstRun) {
+        logMsg('INFO', "First run detected, pushing charging schedule to vehicle");
     }
 
     // ---- Update Charging Schedule ----
@@ -1128,6 +1235,28 @@ function main(): void
         // Wall Charger status (optional)
         $session = rivianLoadSession();
         if ($session) {
+            // Rivian vehicle battery status
+            $vehicleBattery = rivianGetVehicleBattery($session, $config['rivian']['vehicle_id'] ?? '');
+            if ($vehicleBattery) {
+                echo "\n=== Rivian Vehicle Battery ===\n";
+                echo sprintf("  Battery Level:   %.1f%%\n", $vehicleBattery['battery_level']);
+                echo sprintf("  Charge Limit:    %.0f%%\n", $vehicleBattery['battery_limit']);
+                echo sprintf("  Charger State:   %s\n", $vehicleBattery['charger_state']);
+                echo sprintf("  Charger Status:  %s\n", $vehicleBattery['charger_status']);
+
+                // Show override status
+                $minPct = $config['charging']['rivian_min_battery_pct'] ?? 20;
+                $fullPct = $config['charging']['rivian_full_charge_limit_pct'] ?? 85;
+                if ($vehicleBattery['battery_level'] < $minPct) {
+                    echo sprintf("  ** OVERRIDE: Battery below %d%%, would force full-power charge **\n", $minPct);
+                } elseif ($vehicleBattery['battery_limit'] >= $fullPct) {
+                    echo sprintf("  ** OVERRIDE: Charge limit at %.0f%% (>= %d%% trigger), would force full-power charge **\n",
+                        $vehicleBattery['battery_limit'], $fullPct);
+                } else {
+                    echo "  Mode: Solar-only charging\n";
+                }
+            }
+
             if (!empty($config['rivian']['wallbox_id'])) {
                 $wallbox = rivianGetWallboxStatus($session, $config['rivian']['wallbox_id']);
                 if ($wallbox) {
