@@ -65,6 +65,8 @@ const SESSION_FILE   = __DIR__ . '/rivian_session.json';
 const TESLA_TOKEN_FILE = __DIR__ . '/tesla_token.json';
 const LOG_FILE       = __DIR__ . '/solar_charge.log';
 const STATE_FILE     = __DIR__ . '/charge_state.json';
+const HISTORY_FILE   = __DIR__ . '/charge_history.json';
+const MODE_FILE      = __DIR__ . '/charge_mode.json';
 
 const RIVIAN_GQL_URL      = 'https://rivian.com/api/gql/gateway/graphql';
 const RIVIAN_CHRG_GQL_URL = 'https://rivian.com/api/gql/chrg/user/graphql';
@@ -118,6 +120,11 @@ function loadConfig(): array
                 'rivian_full_charge_limit_pct' => 85,
                 'poll_interval_seconds' => 300,
                 'week_days' => ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'],
+            ],
+            'tou_schedule' => [
+                'start_time' => '00:00',
+                'end_time'   => '06:00',
+                'amps'       => 48,
             ],
         ];
         file_put_contents(CONFIG_FILE, json_encode($example, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
@@ -775,39 +782,122 @@ function saveChargeState(array $state): void
 }
 
 // ===========================================================================
+// HISTORY LOGGING
+// ===========================================================================
+
+/**
+ * Append a data point to the history file.
+ * Keeps the last 48 hours of data (576 entries at 5-min intervals).
+ */
+function appendHistory(array $dataPoint): void
+{
+    $history = [];
+    if (file_exists(HISTORY_FILE)) {
+        $history = json_decode(file_get_contents(HISTORY_FILE), true) ?? [];
+    }
+
+    $dataPoint['timestamp'] = time();
+    $history[] = $dataPoint;
+
+    // Keep last 48 hours (576 entries at 5-min intervals, generous buffer)
+    $cutoff = time() - 48 * 3600;
+    $history = array_values(array_filter($history, fn($h) => ($h['timestamp'] ?? 0) >= $cutoff));
+
+    file_put_contents(HISTORY_FILE, json_encode($history));
+}
+
+// ===========================================================================
+// CHARGE MODE MANAGEMENT
+// ===========================================================================
+
+/**
+ * Get the current charge mode: 'solar' or 'schedule'
+ */
+function getChargeMode(): string
+{
+    if (file_exists(MODE_FILE)) {
+        $data = json_decode(file_get_contents(MODE_FILE), true);
+        return $data['mode'] ?? 'solar';
+    }
+    return 'solar';
+}
+
+/**
+ * Set the charge mode.
+ */
+function setChargeMode(string $mode): void
+{
+    file_put_contents(MODE_FILE, json_encode([
+        'mode'       => $mode,
+        'changed_at' => time(),
+    ], JSON_PRETTY_PRINT));
+}
+
+/**
+ * Determine if now is within the TOU schedule window.
+ */
+function isInTouWindow(array $touConfig): bool
+{
+    $now = new DateTime();
+    $currentMinutes = (int) $now->format('G') * 60 + (int) $now->format('i');
+
+    $startParts = explode(':', $touConfig['start_time'] ?? '00:00');
+    $endParts   = explode(':', $touConfig['end_time'] ?? '06:00');
+    $startMin   = ((int) $startParts[0]) * 60 + ((int) ($startParts[1] ?? 0));
+    $endMin     = ((int) $endParts[0]) * 60 + ((int) ($endParts[1] ?? 0));
+
+    // Handle overnight windows (e.g. 22:00 to 06:00)
+    if ($startMin <= $endMin) {
+        return $currentMinutes >= $startMin && $currentMinutes < $endMin;
+    } else {
+        return $currentMinutes >= $startMin || $currentMinutes < $endMin;
+    }
+}
+
+// ===========================================================================
 // CORE LOGIC
 // ===========================================================================
 
-function calculateTargetAmps(array $meters, float $batterySoe, array $chargingConfig): int
+function calculateTargetAmps(array $meters, float $batterySoe, array $chargingConfig, int $currentChargingAmps = 0): int
 {
     $solarW    = $meters['solar_w'];
     $gridW     = $meters['grid_w'];   // negative = exporting to grid
     $batteryW  = $meters['battery_w']; // negative = Powerwall is charging
     $loadW     = $meters['load_w'];
 
+    // Estimate how much of the home load is the truck charging.
+    // This power is "ours" to redistribute since we control it.
+    $currentChargingW = $currentChargingAmps * CHARGER_VOLTAGE;
+
     logMsg('INFO', sprintf(
-        "Solar: %.0fW | Grid: %.0fW | Battery: %.0fW (%.1f%%) | Home: %.0fW",
-        $solarW, $gridW, $batteryW, $batterySoe, $loadW
+        "Solar: %.0fW | Grid: %.0fW | Battery: %.0fW (%.1f%%) | Home: %.0fW | Truck charging: %.0fW",
+        $solarW, $gridW, $batteryW, $batterySoe, $loadW, $currentChargingW
     ));
 
     // If Powerwall is below threshold, all solar goes to the battery first
-    if ($batterySoe < $chargingConfig['powerwall_min_battery_pct']) {
+    $pwThreshold = $chargingConfig['powerwall_min_battery_pct'] ?? 20;
+    if ($batterySoe < $pwThreshold) {
         logMsg('INFO', sprintf(
             "Powerwall at %.1f%% (threshold: %d%%), prioritizing battery charging",
-            $batterySoe, $chargingConfig['powerwall_min_battery_pct']
+            $batterySoe, $pwThreshold
         ));
         return 0;
     }
 
-    // Calculate available surplus from two sources:
+    // Calculate available surplus.
     //
-    // 1. Grid export: energy leaving the house unused (negative grid_w)
-    // 2. Powerwall charge rate: once the Powerwall is above the threshold,
-    //    the energy flowing into it can be shared with the vehicle. The
-    //    Powerwall will naturally absorb whatever the vehicle doesn't use.
+    // The home load includes the truck's charging power, so when the truck
+    // is actively charging, the solar appears fully consumed even though
+    // we control how much the truck draws. We need to add back the current
+    // truck charging power to see the true surplus available.
+    //
+    // Sources of available energy:
+    //   1. Grid export (negative grid_w): energy leaving the house unused
+    //   2. Powerwall charge rate: shareable once above threshold
+    //   3. Current truck charging: power we already control and can reallocate
     $surplusW = 0;
 
-    // Energy being exported to the grid is clearly available
+    // Energy being exported to the grid
     if ($gridW < 0) {
         $surplusW += abs($gridW);
     }
@@ -817,11 +907,15 @@ function calculateTargetAmps(array $meters, float $batterySoe, array $chargingCo
         $surplusW += abs($batteryW);
     }
 
+    // Add back what the truck is currently consuming since that's ours
+    $surplusW += $currentChargingW;
+
     logMsg('INFO', sprintf(
-        "Available surplus: %.0fW (grid export: %.0fW + battery share: %.0fW)",
+        "Available surplus: %.0fW (grid export: %.0fW + battery share: %.0fW + truck recycled: %.0fW)",
         $surplusW,
         $gridW < 0 ? abs($gridW) : 0,
-        $batteryW < 0 ? abs($batteryW) : 0
+        $batteryW < 0 ? abs($batteryW) : 0,
+        $currentChargingW
     ));
 
     // Not enough surplus solar
@@ -846,6 +940,21 @@ function runOnce(array $config): void
     $teslaConfig = $config['tesla'];
     $rivConfig   = $config['rivian'];
     $chgConfig   = $config['charging'];
+    $touConfig   = $config['tou_schedule'] ?? [];
+
+    // ---- Determine charge mode ----
+    $mode = getChargeMode();
+    logMsg('INFO', "Mode: $mode");
+
+    // ---- Always fetch Tesla data for history logging ----
+    $liveData = null;
+    $teslaToken = teslaLoadToken();
+    if (!$teslaToken) {
+        $teslaToken = teslaRefreshToken($teslaConfig['refresh_token']);
+    }
+    if ($teslaToken) {
+        $liveData = teslaGetLiveStatus($teslaToken['access_token'], $teslaConfig['site_id']);
+    }
 
     // ---- Rivian Session (needed for vehicle state and charging schedule) ----
     $session = rivianLoadSession();
@@ -893,26 +1002,28 @@ function runOnce(array $config): void
             );
         }
     } else {
-        logMsg('INFO', "Could not fetch Rivian battery state, proceeding with solar-only logic");
+        logMsg('INFO', "Could not fetch Rivian battery state, proceeding with current mode logic");
     }
 
-    // ---- If forced full charge, skip solar calculation ----
+    // ---- Determine target amps based on mode and overrides ----
     if ($forceFullCharge) {
+        // Overrides always win regardless of mode
         logMsg('INFO', "FORCE CHARGE: $forceReason");
         $targetAmps = $chgConfig['max_amps'];
         $shouldCharge = true;
-    } else {
-        // ---- Tesla Cloud Data ----
-        $teslaToken = teslaLoadToken();
-        if (!$teslaToken) {
-            $teslaToken = teslaRefreshToken($teslaConfig['refresh_token']);
-            if (!$teslaToken) {
-                logMsg('ERROR', "Cannot authenticate with Tesla API. Run --tesla-setup.");
-                return;
-            }
+    } elseif ($mode === 'schedule') {
+        // TOU schedule mode: charge at configured amps during off-peak, block otherwise
+        if (isInTouWindow($touConfig)) {
+            $targetAmps = $touConfig['amps'] ?? $chgConfig['max_amps'];
+            $shouldCharge = true;
+            logMsg('INFO', sprintf("TOU schedule: within off-peak window, charging at %dA", $targetAmps));
+        } else {
+            $targetAmps = 0;
+            $shouldCharge = false;
+            logMsg('INFO', "TOU schedule: outside off-peak window, charging blocked");
         }
-
-        $liveData = teslaGetLiveStatus($teslaToken['access_token'], $teslaConfig['site_id']);
+    } else {
+        // Solar mode: calculate from surplus
         if (!$liveData) {
             logMsg('ERROR', "Cannot read Tesla energy data, skipping this cycle");
             return;
@@ -921,10 +1032,26 @@ function runOnce(array $config): void
         $meters     = $liveData;
         $batterySoe = $liveData['battery_pct'];
 
-        // ---- Calculate Target from solar surplus ----
-        $targetAmps = calculateTargetAmps($meters, $batterySoe, $chgConfig);
+        $priorState = loadChargeState();
+        $currentAmps = $priorState['charging_enabled'] ? $priorState['last_amps'] : 0;
+        $targetAmps = calculateTargetAmps($meters, $batterySoe, $chgConfig, $currentAmps);
         $shouldCharge = $targetAmps > 0;
     }
+
+    // ---- Log history data point ----
+    $historyPoint = [
+        'mode'           => $mode,
+        'target_amps'    => $targetAmps,
+        'charging'       => $shouldCharge,
+        'solar_w'        => $liveData['solar_w'] ?? null,
+        'grid_w'         => $liveData['grid_w'] ?? null,
+        'battery_w'      => $liveData['battery_w'] ?? null,
+        'load_w'         => $liveData['load_w'] ?? null,
+        'powerwall_pct'  => $liveData['battery_pct'] ?? null,
+        'rivian_pct'     => $vehicleBattery['battery_level'] ?? null,
+        'rivian_limit'   => $vehicleBattery['battery_limit'] ?? null,
+    ];
+    appendHistory($historyPoint);
 
     // ---- Check if update is needed ----
     $state = loadChargeState();
@@ -1217,7 +1344,9 @@ function main(): void
                 echo sprintf("  Battery (neg=chg): %6.0f W\n", $liveData['battery_w']);
                 echo sprintf("  Battery SOE:       %5.1f%%\n", $soe);
 
-                $targetAmps = calculateTargetAmps($liveData, $soe, $config['charging']);
+                $statusState = loadChargeState();
+                $statusCurrentAmps = $statusState['charging_enabled'] ? $statusState['last_amps'] : 0;
+                $targetAmps = calculateTargetAmps($liveData, $soe, $config['charging'], $statusCurrentAmps);
                 echo "\n=== Charging Decision ===\n";
                 echo sprintf("  Target Amps: %d A\n", $targetAmps);
                 echo sprintf("  Would Charge: %s\n", $targetAmps > 0 ? 'YES' : 'NO');

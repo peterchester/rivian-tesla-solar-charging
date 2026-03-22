@@ -5,6 +5,8 @@ rivian_session.json
 
 # Runtime state
 charge_state.json
+charge_history.json
+charge_mode.json
 
 # Logs
 solar_charge.log
