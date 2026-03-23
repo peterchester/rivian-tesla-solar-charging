@@ -113,6 +113,7 @@ function loadConfig(): array
             'charging' => [
                 'home_latitude'      => 37.0000,
                 'home_longitude'     => -122.0000,
+                'timezone'           => 'UTC',
                 'min_solar_watts'    => 600,
                 'min_amps'           => 8,
                 'max_amps'           => 48,
@@ -341,6 +342,15 @@ function teslaGetLiveStatus(string $accessToken, string $siteId): ?array
 function teslaGetProducts(string $accessToken): ?array
 {
     return teslaApiRequest($accessToken, '/api/1/products');
+}
+
+/**
+ * Get Tesla energy site info including installation timezone.
+ */
+function teslaGetSiteInfo(string $accessToken, string $siteId): ?array
+{
+    $data = teslaApiRequest($accessToken, "/api/1/energy_sites/{$siteId}/site_info");
+    return $data['response'] ?? null;
 }
 
 /**
@@ -906,9 +916,14 @@ function setChargeMode(string $mode): void
 /**
  * Determine if now is within the TOU schedule window.
  */
-function isInTouWindow(array $touConfig): bool
+function isInTouWindow(array $touConfig, string $timezone = 'UTC'): bool
 {
-    $now = new DateTime();
+    try {
+        $tz = new DateTimeZone($timezone);
+    } catch (Exception $e) {
+        $tz = new DateTimeZone('UTC');
+    }
+    $now = new DateTime('now', $tz);
     $currentMinutes = (int) $now->format('G') * 60 + (int) $now->format('i');
 
     $startParts = explode(':', $touConfig['start_time'] ?? '00:00');
@@ -1128,7 +1143,7 @@ function runOnce(array $config): void
         $shouldCharge = true;
     } elseif ($mode === 'schedule') {
         // TOU schedule mode: charge at configured amps during off-peak, block otherwise
-        if (isInTouWindow($touConfig)) {
+        if (isInTouWindow($touConfig, $chgConfig['timezone'] ?? 'UTC')) {
             $targetAmps = $touConfig['amps'] ?? $chgConfig['max_amps'];
             $shouldCharge = true;
             logMsg('INFO', sprintf("TOU schedule: within off-peak window, charging at %dA", $targetAmps));
@@ -1462,8 +1477,21 @@ function main(): void
             if (count($energySites) === 1 || $currentSiteId === 'YOUR_ENERGY_SITE_ID') {
                 $config['tesla']['site_id'] = (string) $energySites[0]['energy_site_id'];
                 $configChanged = true;
-                echo sprintf("Auto-configured site_id: %s\n\n", $config['tesla']['site_id']);
+                echo sprintf("Auto-configured site_id: %s\n", $config['tesla']['site_id']);
             }
+
+            // Fetch site_info to get the installation timezone
+            $siteId = $config['tesla']['site_id'] ?? '';
+            if (!empty($siteId)) {
+                $siteInfo = teslaGetSiteInfo($tokenData['access_token'], $siteId);
+                $tz = $siteInfo['installation_time_zone'] ?? null;
+                if ($tz) {
+                    $config['charging']['timezone'] = $tz;
+                    $configChanged = true;
+                    echo sprintf("Auto-configured timezone: %s\n", $tz);
+                }
+            }
+            echo "\n";
         } else {
             echo "\nNo energy sites found. Full API response:\n";
             echo json_encode($products, JSON_PRETTY_PRINT) . "\n\n";
