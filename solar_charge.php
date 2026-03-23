@@ -67,6 +67,7 @@ const LOG_FILE       = __DIR__ . '/solar_charge.log';
 const STATE_FILE     = __DIR__ . '/charge_state.json';
 const HISTORY_FILE   = __DIR__ . '/charge_history.json';
 const MODE_FILE      = __DIR__ . '/charge_mode.json';
+const MFA_FILE       = __DIR__ . '/rivian_mfa_pending.json';
 
 const RIVIAN_GQL_URL      = 'https://rivian.com/api/gql/gateway/graphql';
 const RIVIAN_CHRG_GQL_URL = 'https://rivian.com/api/gql/chrg/user/graphql';
@@ -508,8 +509,12 @@ function rivianGraphQL(array $session, array $payload): ?array
  * Authenticate with Rivian. Returns session tokens.
  * Step 1: Get CSRF token
  * Step 2: Login (may trigger MFA)
+ *
+ * If MFA is required and $interactive is true, prompts on CLI.
+ * If MFA is required and $interactive is false, saves challenge to MFA_FILE
+ * for the web dashboard to complete.
  */
-function rivianAuthenticate(array $rivConfig): ?array
+function rivianAuthenticate(array $rivConfig, bool $interactive = true): ?array
 {
     // Step 1: CSRF token
     $csrfPayload = [
@@ -566,26 +571,21 @@ function rivianAuthenticate(array $rivConfig): ?array
         $otpToken = $loginResult['otpToken'];
         logMsg('INFO', "Rivian MFA required. Check your phone/email for the OTP code.");
 
-        echo "Enter the OTP code sent to your phone/email: ";
-        $otpCode = trim(fgets(STDIN));
-
-        $otpPayload = [
-            'operationName' => 'LoginWithOTP',
-            'variables'     => [
-                'email'    => $rivConfig['email'],
-                'otpCode'  => $otpCode,
-                'otpToken' => $otpToken,
-            ],
-            'query' => 'mutation LoginWithOTP($email: String!, $otpCode: String!, $otpToken: String!) { loginWithOTP(email: $email, otpCode: $otpCode, otpToken: $otpToken) { __typename accessToken refreshToken userSessionToken } }',
-        ];
-
-        $otpResp = httpRequest(RIVIAN_GQL_URL, 'POST', json_encode($otpPayload), $loginHeaders);
-        $otpData = json_decode($otpResp['body'], true);
-
-        $loginResult = $otpData['data']['loginWithOTP'] ?? null;
-
-        if (!$loginResult || empty($loginResult['userSessionToken'])) {
-            logMsg('ERROR', "Rivian OTP login failed");
+        if ($interactive) {
+            // CLI mode: prompt for OTP
+            echo "Enter the OTP code sent to your phone/email: ";
+            $otpCode = trim(fgets(STDIN));
+            return rivianCompleteMfa($rivConfig['email'], $otpCode, $otpToken, $aSess, $csrfToken);
+        } else {
+            // Non-interactive mode: save MFA challenge for web dashboard
+            file_put_contents(MFA_FILE, json_encode([
+                'otp_token'  => $otpToken,
+                'a_sess'     => $aSess,
+                'csrf_token' => $csrfToken,
+                'email'      => $rivConfig['email'],
+                'created_at' => time(),
+            ], JSON_PRETTY_PRINT));
+            logMsg('INFO', "MFA challenge saved. Enter the OTP code via the web dashboard.");
             return null;
         }
     }
@@ -599,7 +599,58 @@ function rivianAuthenticate(array $rivConfig): ?array
     ];
 
     rivianSaveSession($session);
+    // Clear any pending MFA file
+    if (file_exists(MFA_FILE)) unlink(MFA_FILE);
     logMsg('INFO', "Rivian authentication successful, session saved");
+
+    return $session;
+}
+
+/**
+ * Complete Rivian MFA with an OTP code.
+ * Can be called from CLI or web dashboard.
+ */
+function rivianCompleteMfa(string $email, string $otpCode, string $otpToken, string $aSess, string $csrfToken): ?array
+{
+    $loginHeaders = [
+        'Content-Type: application/json',
+        "a-sess: $aSess",
+        "csrf-token: $csrfToken",
+        'apollographql-client-name: com.rivian.android.consumer',
+    ];
+
+    $otpPayload = [
+        'operationName' => 'LoginWithOTP',
+        'variables'     => [
+            'email'    => $email,
+            'otpCode'  => $otpCode,
+            'otpToken' => $otpToken,
+        ],
+        'query' => 'mutation LoginWithOTP($email: String!, $otpCode: String!, $otpToken: String!) { loginWithOTP(email: $email, otpCode: $otpCode, otpToken: $otpToken) { __typename accessToken refreshToken userSessionToken } }',
+    ];
+
+    $otpResp = httpRequest(RIVIAN_GQL_URL, 'POST', json_encode($otpPayload), $loginHeaders);
+    $otpData = json_decode($otpResp['body'], true);
+
+    $loginResult = $otpData['data']['loginWithOTP'] ?? null;
+
+    if (!$loginResult || empty($loginResult['userSessionToken'])) {
+        logMsg('ERROR', "Rivian OTP login failed");
+        return null;
+    }
+
+    $session = [
+        'a_sess'       => $aSess,
+        'u_sess'       => $loginResult['userSessionToken'],
+        'csrf_token'   => $csrfToken,
+        'access_token' => $loginResult['accessToken'] ?? '',
+        'refresh_token' => $loginResult['refreshToken'] ?? '',
+    ];
+
+    rivianSaveSession($session);
+    // Clear the pending MFA file
+    if (file_exists(MFA_FILE)) unlink(MFA_FILE);
+    logMsg('INFO', "Rivian MFA authentication successful, session saved");
 
     return $session;
 }
@@ -988,9 +1039,9 @@ function runOnce(array $config): void
     $session = rivianLoadSession();
     if (!$session) {
         logMsg('INFO', "No valid Rivian session found, authenticating...");
-        $session = rivianAuthenticate($rivConfig);
+        $session = rivianAuthenticate($rivConfig, false); // non-interactive, MFA goes to dashboard
         if (!$session) {
-            logMsg('ERROR', "Rivian authentication failed. Run with --rivian-setup for interactive login.");
+            logMsg('ERROR', "Rivian session expired. Enter OTP code via the web dashboard or run --rivian-setup.");
             return;
         }
     }
@@ -1501,4 +1552,7 @@ function main(): void
     runOnce($config);
 }
 
-main();
+// Only run main() when executed directly, not when included via require
+if (php_sapi_name() === 'cli' && realpath($argv[0] ?? '') === realpath(__FILE__)) {
+    main();
+}

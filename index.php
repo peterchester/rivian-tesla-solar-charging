@@ -63,6 +63,62 @@ if (isset($_GET['api'])) {
             echo json_encode(['success' => true, 'mode' => $newMode]);
             break;
 
+        case 'mfa_status':
+            $mfaPending = false;
+            if (file_exists("$baseDir/rivian_mfa_pending.json")) {
+                $mfa = json_decode(file_get_contents("$baseDir/rivian_mfa_pending.json"), true);
+                // MFA challenges expire after ~5 minutes
+                if ($mfa && (time() - ($mfa['created_at'] ?? 0)) < 300) {
+                    $mfaPending = true;
+                }
+            }
+            // Also check if session is missing/expired
+            $sessionValid = false;
+            if (file_exists("$baseDir/rivian_session.json")) {
+                $sess = json_decode(file_get_contents("$baseDir/rivian_session.json"), true);
+                if ($sess && !empty($sess['u_sess'])) {
+                    $age = time() - ($sess['created_at'] ?? 0);
+                    $sessionValid = $age < 86400 * 6;
+                }
+            }
+            echo json_encode([
+                'mfa_pending'   => $mfaPending,
+                'session_valid' => $sessionValid,
+            ]);
+            break;
+
+        case 'submit_otp':
+            $input = json_decode(file_get_contents('php://input'), true);
+            $otpCode = $input['otp_code'] ?? '';
+
+            if (empty($otpCode) || !file_exists("$baseDir/rivian_mfa_pending.json")) {
+                echo json_encode(['success' => false, 'error' => 'No pending MFA challenge or missing OTP code']);
+                break;
+            }
+
+            $mfa = json_decode(file_get_contents("$baseDir/rivian_mfa_pending.json"), true);
+            if (!$mfa || (time() - ($mfa['created_at'] ?? 0)) >= 300) {
+                echo json_encode(['success' => false, 'error' => 'MFA challenge expired. The daemon will request a new one on the next cycle.']);
+                break;
+            }
+
+            // Include the solar_charge.php functions to complete MFA
+            require_once "$baseDir/solar_charge.php";
+            $session = rivianCompleteMfa(
+                $mfa['email'],
+                $otpCode,
+                $mfa['otp_token'],
+                $mfa['a_sess'],
+                $mfa['csrf_token']
+            );
+
+            if ($session) {
+                echo json_encode(['success' => true, 'message' => 'Rivian session restored!']);
+            } else {
+                echo json_encode(['success' => false, 'error' => 'Invalid OTP code. Check the code and try again.']);
+            }
+            break;
+
         default:
             echo json_encode(['error' => 'unknown endpoint']);
     }
@@ -292,6 +348,73 @@ canvas {
     color: var(--grid);
 }
 
+.mfa-panel {
+    display: none;
+    background: var(--surface);
+    border: 1px solid var(--solar);
+    border-radius: 12px;
+    padding: 20px 24px;
+    margin-bottom: 24px;
+}
+
+.mfa-panel.visible { display: block; }
+
+.mfa-title {
+    font-size: 1rem;
+    font-weight: 700;
+    margin-bottom: 6px;
+}
+
+.mfa-desc {
+    font-size: 0.85rem;
+    color: var(--text-dim);
+    margin-bottom: 14px;
+}
+
+.mfa-input-row {
+    display: flex;
+    gap: 10px;
+}
+
+.mfa-input {
+    flex: 1;
+    max-width: 200px;
+    padding: 10px 14px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.1rem;
+    letter-spacing: 0.15em;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    outline: none;
+}
+
+.mfa-input:focus { border-color: var(--solar); }
+
+.mfa-btn {
+    padding: 10px 20px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 0.9rem;
+    font-weight: 600;
+    background: var(--solar);
+    color: var(--bg);
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: opacity 0.2s;
+}
+
+.mfa-btn:hover { opacity: 0.85; }
+
+.mfa-status {
+    font-size: 0.85rem;
+    margin-top: 10px;
+}
+
+.mfa-status.success { color: var(--charging); }
+.mfa-status.error { color: var(--grid); }
+
 @media (max-width: 600px) {
     .grid-cards { grid-template-columns: repeat(2, 1fr); }
     .card-value { font-size: 1.3rem; }
@@ -313,6 +436,16 @@ canvas {
     </header>
 
     <div class="daemon-alert" id="daemonAlert"></div>
+
+    <div class="mfa-panel" id="mfaPanel">
+        <div class="mfa-title">🔐 Rivian Session Expired</div>
+        <div class="mfa-desc">An OTP code has been sent to your phone/email. Enter it below to restore the connection.</div>
+        <div class="mfa-input-row">
+            <input type="text" id="otpInput" class="mfa-input" placeholder="Enter OTP code" maxlength="10" inputmode="numeric" autocomplete="one-time-code">
+            <button class="mfa-btn" onclick="submitOtp()">Submit</button>
+        </div>
+        <div class="mfa-status" id="mfaStatus"></div>
+    </div>
 
     <div class="grid-cards">
         <div class="card solar">
@@ -608,9 +741,72 @@ async function setMode(mode) {
     }
 }
 
+async function checkMfa() {
+    try {
+        const resp = await fetch('?api=mfa_status');
+        const data = await resp.json();
+        const panel = document.getElementById('mfaPanel');
+
+        if (data.mfa_pending) {
+            panel.classList.add('visible');
+        } else {
+            panel.classList.remove('visible');
+            document.getElementById('mfaStatus').textContent = '';
+            document.getElementById('otpInput').value = '';
+        }
+    } catch (e) {
+        console.error('MFA check error:', e);
+    }
+}
+
+async function submitOtp() {
+    const otpCode = document.getElementById('otpInput').value.trim();
+    const statusEl = document.getElementById('mfaStatus');
+
+    if (!otpCode) {
+        statusEl.className = 'mfa-status error';
+        statusEl.textContent = 'Please enter the OTP code.';
+        return;
+    }
+
+    statusEl.className = 'mfa-status';
+    statusEl.textContent = 'Submitting...';
+
+    try {
+        const resp = await fetch('?api=submit_otp', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ otp_code: otpCode })
+        });
+        const data = await resp.json();
+
+        if (data.success) {
+            statusEl.className = 'mfa-status success';
+            statusEl.textContent = data.message;
+            setTimeout(() => {
+                document.getElementById('mfaPanel').classList.remove('visible');
+                fetchStatus();
+            }, 2000);
+        } else {
+            statusEl.className = 'mfa-status error';
+            statusEl.textContent = data.error;
+        }
+    } catch (e) {
+        statusEl.className = 'mfa-status error';
+        statusEl.textContent = 'Network error. Please try again.';
+    }
+}
+
+// Allow Enter key to submit OTP
+document.getElementById('otpInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') submitOtp();
+});
+
 // Initial load and auto-refresh
 fetchStatus();
+checkMfa();
 setInterval(fetchStatus, 30000);
+setInterval(checkMfa, 30000);
 </script>
 </body>
 </html>
