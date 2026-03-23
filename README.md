@@ -198,6 +198,17 @@ Surplus solar is calculated from two sources: energy being exported to the grid 
 - The script does not wake the Rivian vehicle; charging schedules are managed server-side
 - Credentials are stored in plain text in `config.json`; protect this file appropriately
 
+## Disclaimer
+
+This software controls real physical hardware including electric vehicle charging systems and interacts with home energy infrastructure. By using this software, you acknowledge and accept the following:
+
+- **Use at your own risk.** This software is provided as-is with no guarantees of any kind. The authors are not responsible for any damage to your vehicle, charging equipment, electrical systems, home energy systems, or any other property.
+- **Unofficial APIs.** This software relies on unofficial, undocumented APIs from both Tesla and Rivian that may change, break, or behave unexpectedly at any time without notice.
+- **No safety guarantees.** While the software attempts to make reasonable charging decisions, it should not be relied upon as a safety system. Always ensure your electrical installation meets local codes and that your charging equipment is properly rated and installed by a licensed electrician.
+- **Monitor your system.** Regularly check that the software is behaving as expected, especially after software updates to your vehicle, Powerwall, or charger firmware.
+- **Not affiliated with Tesla or Rivian.** This project is not endorsed by, affiliated with, or supported by Tesla, Inc. or Rivian Automotive, LLC.
+- **Credential security.** This software stores your Rivian email and password in plain text in `config.json`. Treat this file as highly sensitive. Restrict file permissions (`chmod 600 config.json`), do not commit it to version control, and do not store it on shared or publicly accessible servers without proper access controls.
+
 ## Authors
 
 - **Peter Chester** ([@peterchester](https://github.com/peterchester))
