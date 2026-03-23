@@ -54,7 +54,8 @@
  * License: MIT
  */
 
-declare(strict_types=1);
+// Note: declare(strict_types=1) removed for shared hosting compatibility
+// (hosting auto-prepend scripts prevent it from being the first statement)
 
 // ---------------------------------------------------------------------------
 // Configuration
