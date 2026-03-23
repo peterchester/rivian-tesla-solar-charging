@@ -54,17 +54,20 @@ if (isset($_GET['api'])) {
             break;
 
         case 'set_mode':
-            $input = json_decode(file_get_contents('php://input'), true);
-            $newMode = ($input['mode'] ?? $_GET['mode'] ?? '') === 'schedule' ? 'schedule' : 'solar';
+            $newMode = ($_GET['mode'] ?? '') === 'schedule' ? 'schedule' : 'solar';
             file_put_contents("$baseDir/charge_mode.json", json_encode([
                 'mode'       => $newMode,
                 'changed_at' => time(),
             ], JSON_PRETTY_PRINT));
-            // Run the script immediately so the mode change takes effect now
-            $phpBin = PHP_BINARY ?: '/usr/local/bin/php';
-            $script = escapeshellarg("$baseDir/solar_charge.php");
-            exec("$phpBin $script > /dev/null 2>&1 &");
-            echo json_encode(['success' => true, 'mode' => $newMode, 'executed' => true]);
+            // Try to run the script immediately so the mode change takes effect now
+            $executed = false;
+            if (function_exists('exec')) {
+                $phpBin = PHP_BINARY ?: '/usr/local/bin/php';
+                $script = escapeshellarg("$baseDir/solar_charge.php");
+                exec("$phpBin $script > /dev/null 2>&1 &");
+                $executed = true;
+            }
+            echo json_encode(['success' => true, 'mode' => $newMode, 'executed' => $executed]);
             break;
 
         case 'mfa_status':
@@ -779,15 +782,13 @@ function updateCharts(history) {
 
 async function setMode(mode) {
     try {
-        await fetch('?api=set_mode', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mode })
-        });
+        await fetch('?api=set_mode&mode=' + encodeURIComponent(mode));
         // Immediate refresh to show mode change
         fetchStatus();
         // Second refresh after script finishes executing (~5s)
         setTimeout(fetchStatus, 5000);
+        // Third refresh in case the script took longer
+        setTimeout(fetchStatus, 15000);
     } catch (e) {
         console.error('Mode set error:', e);
     }
