@@ -575,10 +575,10 @@ canvas {
     </div>
 
     <div class="time-range-bar">
-        <button class="range-btn" data-hours="3" onclick="setTimeRange(3)">3h</button>
+        <button class="range-btn active" data-hours="3" onclick="setTimeRange(3)">3h</button>
         <button class="range-btn" data-hours="6" onclick="setTimeRange(6)">6h</button>
         <button class="range-btn" data-hours="12" onclick="setTimeRange(12)">12h</button>
-        <button class="range-btn active" data-hours="24" onclick="setTimeRange(24)">24h</button>
+        <button class="range-btn" data-hours="24" onclick="setTimeRange(24)">24h</button>
         <button class="range-btn" data-hours="168" onclick="setTimeRange(168)">1wk</button>
     </div>
 
@@ -610,7 +610,7 @@ canvas {
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>
 let powerChart, chargeChart;
-let timeRangeHours = 24;
+let timeRangeHours = 3;
 let lastHistory = [];
 
 const chartDefaults = {
