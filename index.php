@@ -497,18 +497,17 @@ async function fetchStatus() {
             ? 'Last update: ' + new Date(latestTimestamp * 1000).toLocaleString()
             : 'No data yet';
 
-        // Daemon health check
+        // Daemon health check (use history timestamp, which updates every cycle)
         const daemonAlert = document.getElementById('daemonAlert');
-        if (state.last_update) {
-            const ageSeconds = Math.floor(Date.now() / 1000) - state.last_update;
+        const lastActivityTimestamp = latest.timestamp ?? state.last_update;
+        if (lastActivityTimestamp) {
+            const ageSeconds = Math.floor(Date.now() / 1000) - lastActivityTimestamp;
             const ageMinutes = Math.floor(ageSeconds / 60);
 
             if (ageSeconds > 1800) {
-                // Over 30 minutes: likely crashed
                 daemonAlert.className = 'daemon-alert error';
                 daemonAlert.textContent = '⚠ Daemon appears to have stopped (' + ageMinutes + ' min since last update). Check the terminal or restart with: php solar_charge.php --daemon';
             } else if (ageSeconds > 600) {
-                // Over 10 minutes: might be stalled
                 daemonAlert.className = 'daemon-alert warning';
                 daemonAlert.textContent = '⚠ Daemon may be stalled (' + ageMinutes + ' min since last update). Expected every 5 minutes.';
             } else {
