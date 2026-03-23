@@ -868,7 +868,7 @@ function saveChargeState(array $state): void
 
 /**
  * Append a data point to the history file.
- * Keeps the last 48 hours of data (576 entries at 5-min intervals).
+ * Keeps the last 7 days of data (~2016 entries at 5-min intervals).
  */
 function appendHistory(array $dataPoint): void
 {
@@ -880,8 +880,8 @@ function appendHistory(array $dataPoint): void
     $dataPoint['timestamp'] = time();
     $history[] = $dataPoint;
 
-    // Keep last 48 hours (576 entries at 5-min intervals, generous buffer)
-    $cutoff = time() - 48 * 3600;
+    // Keep last 7 days
+    $cutoff = time() - 7 * 24 * 3600;
     $history = array_values(array_filter($history, fn($h) => ($h['timestamp'] ?? 0) >= $cutoff));
 
     file_put_contents(HISTORY_FILE, json_encode($history));

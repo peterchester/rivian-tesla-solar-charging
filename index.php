@@ -359,6 +359,42 @@ canvas {
     border-radius: 50%;
 }
 
+.time-range-bar {
+    display: flex;
+    justify-content: center;
+    gap: 4px;
+    margin-bottom: 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 4px;
+    width: fit-content;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+.range-btn {
+    padding: 6px 14px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    font-weight: 500;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    border-radius: 7px;
+    transition: all 0.2s;
+}
+
+.range-btn.active {
+    background: var(--surface-2);
+    color: var(--text);
+}
+
+.range-btn:hover:not(.active) {
+    color: var(--text);
+}
+
 .tou-info {
     font-size: 0.85rem;
     color: var(--text-dim);
@@ -538,8 +574,16 @@ canvas {
         </div>
     </div>
 
+    <div class="time-range-bar">
+        <button class="range-btn" data-hours="3" onclick="setTimeRange(3)">3h</button>
+        <button class="range-btn" data-hours="6" onclick="setTimeRange(6)">6h</button>
+        <button class="range-btn" data-hours="12" onclick="setTimeRange(12)">12h</button>
+        <button class="range-btn active" data-hours="24" onclick="setTimeRange(24)">24h</button>
+        <button class="range-btn" data-hours="168" onclick="setTimeRange(168)">1wk</button>
+    </div>
+
     <div class="chart-section">
-        <h2>Power Flow (last 24h)</h2>
+        <h2>Power Flow</h2>
         <canvas id="powerChart"></canvas>
         <div class="legend">
             <div class="legend-item"><div class="legend-dot" style="background:var(--solar)"></div> Solar</div>
@@ -551,7 +595,7 @@ canvas {
     </div>
 
     <div class="chart-section">
-        <h2>Charging Rate &amp; Battery Levels (last 24h)</h2>
+        <h2>Charging Rate &amp; Battery Levels</h2>
         <canvas id="chargeChart"></canvas>
         <div class="legend">
             <div class="legend-item"><div class="legend-dot" style="background:var(--accent)"></div> Charge Rate (A)</div>
@@ -566,6 +610,8 @@ canvas {
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>
 let powerChart, chargeChart;
+let timeRangeHours = 24;
+let lastHistory = [];
 
 const chartDefaults = {
     responsive: true,
@@ -711,6 +757,7 @@ async function fetchStatus() {
         }
 
         // Update charts
+        lastHistory = history;
         updateCharts(history);
     } catch (e) {
         console.error('Fetch error:', e);
@@ -718,11 +765,21 @@ async function fetchStatus() {
 }
 
 function updateCharts(history) {
-    // Filter to last 24h
-    const cutoff = Date.now() / 1000 - 24 * 3600;
+    const cutoff = Date.now() / 1000 - timeRangeHours * 3600;
     const data = history.filter(h => h.timestamp >= cutoff);
 
-    const labels = data.map(h => formatTime(h.timestamp));
+    // Adjust time format based on range
+    const useDate = timeRangeHours > 24;
+    const labels = data.map(h => {
+        const d = new Date(h.timestamp * 1000);
+        if (useDate) {
+            return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        }
+        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    });
+
+    // Adjust tick density based on range
+    const maxTicks = timeRangeHours <= 6 ? 12 : timeRangeHours <= 24 ? 12 : 14;
 
     // Power chart
     const powerData = {
@@ -743,14 +800,13 @@ function updateCharts(history) {
     };
 
     const powerOpts = JSON.parse(JSON.stringify(chartDefaults));
+    powerOpts.scales.x.ticks.maxTicksLimit = maxTicks;
     powerOpts.scales.y.title = { display: true, text: 'kW', color: '#8892a4', font: { family: 'JetBrains Mono', size: 11 } };
 
     if (powerChart) {
-        powerChart.data = powerData;
-        powerChart.update('none');
-    } else {
-        powerChart = new Chart(document.getElementById('powerChart'), { type: 'line', data: powerData, options: powerOpts });
+        powerChart.destroy();
     }
+    powerChart = new Chart(document.getElementById('powerChart'), { type: 'line', data: powerData, options: powerOpts });
 
     // Charge chart (dual Y axis)
     const chargeData = {
@@ -763,6 +819,7 @@ function updateCharts(history) {
     };
 
     const chargeOpts = JSON.parse(JSON.stringify(chartDefaults));
+    chargeOpts.scales.x.ticks.maxTicksLimit = maxTicks;
     chargeOpts.scales.y = {
         ...chargeOpts.scales.y,
         position: 'left',
@@ -779,11 +836,17 @@ function updateCharts(history) {
     };
 
     if (chargeChart) {
-        chargeChart.data = chargeData;
-        chargeChart.update('none');
-    } else {
-        chargeChart = new Chart(document.getElementById('chargeChart'), { type: 'line', data: chargeData, options: chargeOpts });
+        chargeChart.destroy();
     }
+    chargeChart = new Chart(document.getElementById('chargeChart'), { type: 'line', data: chargeData, options: chargeOpts });
+}
+
+function setTimeRange(hours) {
+    timeRangeHours = hours;
+    document.querySelectorAll('.range-btn').forEach(btn => {
+        btn.classList.toggle('active', parseInt(btn.dataset.hours) === hours);
+    });
+    updateCharts(lastHistory);
 }
 
 async function setMode(mode) {
