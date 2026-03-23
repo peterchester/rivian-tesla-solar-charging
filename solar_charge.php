@@ -1077,7 +1077,9 @@ function runOnce(array $config): void
     $rivianPct     = $vehicleBattery['battery_level'] ?? null;
     $rivianLimit   = $vehicleBattery['battery_limit'] ?? null;
 
-    if ($chargerStatus === 'chrgr_sts_not_connected') {
+    if (!$vehicleBattery) {
+        $displayStatus = 'Error';
+    } elseif ($chargerStatus === 'chrgr_sts_not_connected') {
         $displayStatus = 'Unplugged';
     } elseif ($rivianPct !== null && $rivianLimit !== null && $rivianPct >= $rivianLimit) {
         $displayStatus = 'Charge Complete';
