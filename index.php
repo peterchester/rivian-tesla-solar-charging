@@ -575,6 +575,7 @@ canvas {
     </div>
 
     <div class="time-range-bar">
+        <button class="range-btn" data-hours="1" onclick="setTimeRange(1)">1h</button>
         <button class="range-btn active" data-hours="3" onclick="setTimeRange(3)">3h</button>
         <button class="range-btn" data-hours="6" onclick="setTimeRange(6)">6h</button>
         <button class="range-btn" data-hours="12" onclick="setTimeRange(12)">12h</button>
