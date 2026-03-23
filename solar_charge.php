@@ -947,17 +947,18 @@ function isInTouWindow(array $touConfig, string $timezone = 'UTC'): bool
 function calculateTargetAmps(array $meters, float $batterySoe, array $chargingConfig, int $currentChargingAmps = 0): int
 {
     $solarW    = $meters['solar_w'];
-    $gridW     = $meters['grid_w'];   // negative = exporting to grid
-    $batteryW  = $meters['battery_w']; // negative = Powerwall is charging
-    $loadW     = $meters['load_w'];
+    $gridW     = $meters['grid_w'];   // negative = exporting to grid, positive = importing
+    $batteryW  = $meters['battery_w']; // negative = Powerwall is charging, positive = discharging
+    $loadW     = $meters['load_w'];    // total home load including truck
 
-    // Estimate how much of the home load is the truck charging.
-    // This power is "ours" to redistribute since we control it.
+    // Estimate the truck's current draw and subtract it from home load
+    // to get actual household consumption
     $currentChargingW = $currentChargingAmps * CHARGER_VOLTAGE;
+    $homeOnlyW = max(0, $loadW - $currentChargingW);
 
     logMsg('INFO', sprintf(
-        "Solar: %.0fW | Grid: %.0fW | Battery: %.0fW (%.1f%%) | Home: %.0fW | Truck charging: %.0fW",
-        $solarW, $gridW, $batteryW, $batterySoe, $loadW, $currentChargingW
+        "Solar: %.0fW | Grid: %.0fW | Battery: %.0fW (%.1f%%) | Home: %.0fW (house: %.0fW + truck: %.0fW)",
+        $solarW, $gridW, $batteryW, $batterySoe, $loadW, $homeOnlyW, $currentChargingW
     ));
 
     // If Powerwall is below threshold, all solar goes to the battery first
@@ -970,38 +971,26 @@ function calculateTargetAmps(array $meters, float $batterySoe, array $chargingCo
         return 0;
     }
 
-    // Calculate available surplus.
+    // Calculate available surplus for the truck.
     //
-    // The home load includes the truck's charging power, so when the truck
-    // is actively charging, the solar appears fully consumed even though
-    // we control how much the truck draws. We need to add back the current
-    // truck charging power to see the true surplus available.
+    // The key insight: we want to know how much solar power is available
+    // after covering the actual household usage (excluding the truck).
+    // The truck's own draw shouldn't count against the surplus since
+    // we control it and can adjust it.
     //
-    // Sources of available energy:
-    //   1. Grid export (negative grid_w): energy leaving the house unused
-    //   2. Powerwall charge rate: shareable once above threshold
-    //   3. Current truck charging: power we already control and can reallocate
-    $surplusW = 0;
-
-    // Energy being exported to the grid
-    if ($gridW < 0) {
-        $surplusW += abs($gridW);
-    }
-
-    // Energy flowing into the Powerwall is shareable once above threshold
-    if ($batteryW < 0) {
-        $surplusW += abs($batteryW);
-    }
-
-    // Add back what the truck is currently consuming since that's ours
-    $surplusW += $currentChargingW;
+    // surplus = solar - household
+    //
+    // This naturally handles all scenarios:
+    //   - Sunny, low home use: big surplus, truck charges fast
+    //   - Cloudy: solar < home, no surplus, truck stops
+    //   - Powerwall charging: its draw is handled by the threshold check above,
+    //     and any solar beyond home use is available for the truck
+    //     (Powerwall will absorb whatever the truck doesn't use)
+    $surplusW = max(0, $solarW - $homeOnlyW);
 
     logMsg('INFO', sprintf(
-        "Available surplus: %.0fW (grid export: %.0fW + battery share: %.0fW + truck recycled: %.0fW)",
-        $surplusW,
-        $gridW < 0 ? abs($gridW) : 0,
-        $batteryW < 0 ? abs($batteryW) : 0,
-        $currentChargingW
+        "Available surplus: %.0fW (solar %.0fW - household %.0fW)",
+        $surplusW, $solarW, $homeOnlyW
     ));
 
     // Not enough surplus solar
