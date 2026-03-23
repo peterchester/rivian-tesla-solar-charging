@@ -439,10 +439,16 @@ async function fetchStatus() {
         document.getElementById('rvLimit').textContent = latest.rivian_limit ? 'Limit: ' + latest.rivian_limit + '%' : '--';
 
         const state = data.state;
+
+        // Use the latest history point for current status since charge_state.json
+        // only updates when a change is made, not on "no change needed" cycles
+        const isCharging = latest.charging ?? state.charging_enabled ?? false;
+        const currentAmps = latest.target_amps ?? state.last_amps ?? 0;
+
         const statusCard = document.getElementById('statusCard');
-        statusCard.className = 'card ' + (state.charging_enabled ? 'status-charging' : 'status-blocked');
-        document.getElementById('chargeStatus').textContent = state.charging_enabled ? 'Charging' : 'Blocked';
-        document.getElementById('chargeAmps').textContent = state.charging_enabled ? state.last_amps + 'A / ' + (state.last_amps * 240) + 'W' : 'No solar surplus';
+        statusCard.className = 'card ' + (isCharging ? 'status-charging' : 'status-blocked');
+        document.getElementById('chargeStatus').textContent = isCharging ? 'Charging' : 'Blocked';
+        document.getElementById('chargeAmps').textContent = isCharging ? currentAmps + 'A / ' + (currentAmps * 240) + 'W' : 'Solar-only mode';
 
         // Mode toggle
         const mode = data.mode?.mode || 'solar';
@@ -458,8 +464,10 @@ async function fetchStatus() {
             touInfo.classList.remove('visible');
         }
 
-        document.getElementById('lastUpdate').textContent = state.last_update
-            ? 'Last update: ' + new Date(state.last_update * 1000).toLocaleString()
+        // Use latest history timestamp for "last update" if more recent than state
+        const latestTimestamp = latest.timestamp ?? state.last_update;
+        document.getElementById('lastUpdate').textContent = latestTimestamp
+            ? 'Last update: ' + new Date(latestTimestamp * 1000).toLocaleString()
             : 'No data yet';
 
         // Daemon health check
