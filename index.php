@@ -266,6 +266,30 @@ canvas {
     font-family: 'JetBrains Mono', monospace;
 }
 
+.daemon-alert {
+    text-align: center;
+    padding: 12px 20px;
+    border-radius: 10px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    margin-bottom: 24px;
+    display: none;
+}
+
+.daemon-alert.warning {
+    display: block;
+    background: rgba(246, 173, 53, 0.1);
+    border: 1px solid rgba(246, 173, 53, 0.3);
+    color: var(--solar);
+}
+
+.daemon-alert.error {
+    display: block;
+    background: rgba(229, 62, 62, 0.1);
+    border: 1px solid rgba(229, 62, 62, 0.3);
+    color: var(--grid);
+}
+
 @media (max-width: 600px) {
     .grid-cards { grid-template-columns: repeat(2, 1fr); }
     .card-value { font-size: 1.3rem; }
@@ -285,6 +309,8 @@ canvas {
             <div class="tou-info" id="touInfo"></div>
         </div>
     </header>
+
+    <div class="daemon-alert" id="daemonAlert"></div>
 
     <div class="grid-cards">
         <div class="card solar">
@@ -435,6 +461,28 @@ async function fetchStatus() {
         document.getElementById('lastUpdate').textContent = state.last_update
             ? 'Last update: ' + new Date(state.last_update * 1000).toLocaleString()
             : 'No data yet';
+
+        // Daemon health check
+        const daemonAlert = document.getElementById('daemonAlert');
+        if (state.last_update) {
+            const ageSeconds = Math.floor(Date.now() / 1000) - state.last_update;
+            const ageMinutes = Math.floor(ageSeconds / 60);
+
+            if (ageSeconds > 1800) {
+                // Over 30 minutes: likely crashed
+                daemonAlert.className = 'daemon-alert error';
+                daemonAlert.textContent = '⚠ Daemon appears to have stopped (' + ageMinutes + ' min since last update). Check the terminal or restart with: php solar_charge.php --daemon';
+            } else if (ageSeconds > 600) {
+                // Over 10 minutes: might be stalled
+                daemonAlert.className = 'daemon-alert warning';
+                daemonAlert.textContent = '⚠ Daemon may be stalled (' + ageMinutes + ' min since last update). Expected every 5 minutes.';
+            } else {
+                daemonAlert.className = 'daemon-alert';
+            }
+        } else {
+            daemonAlert.className = 'daemon-alert error';
+            daemonAlert.textContent = '⚠ No data found. Start the daemon with: php solar_charge.php --daemon';
+        }
 
         // Update charts
         updateCharts(history);
