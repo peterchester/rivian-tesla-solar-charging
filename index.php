@@ -617,7 +617,7 @@ let lastHistory = [];
 const chartDefaults = {
     responsive: true,
     maintainAspectRatio: false,
-    animation: { duration: 400 },
+    animation: false,
     plugins: {
         legend: { display: false },
         tooltip: {
