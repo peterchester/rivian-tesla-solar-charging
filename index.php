@@ -632,7 +632,7 @@ async function fetchStatus() {
         const displayStatus = latest.status ?? (isCharging ? 'Solar Charging' : 'Waiting for the Sun');
 
         const statusCard = document.getElementById('statusCard');
-        const isActiveCharge = ['Solar Charging', 'Override Charging'].includes(displayStatus);
+        const isActiveCharge = ['Solar Charging', 'Override Charging', 'Scheduled Charging'].includes(displayStatus);
         const isWaiting = ['Waiting for the Sun', 'Scheduled'].includes(displayStatus);
         const isComplete = displayStatus === 'Charge Complete';
         const isUnplugged = displayStatus === 'Unplugged';

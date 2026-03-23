@@ -1195,6 +1195,8 @@ function runOnce(array $config): void
         $displayStatus = 'Charge Complete';
     } elseif ($forceFullCharge && $shouldCharge) {
         $displayStatus = 'Override Charging';
+    } elseif ($mode === 'schedule' && $shouldCharge) {
+        $displayStatus = 'Scheduled Charging';
     } elseif ($mode === 'schedule' && !$shouldCharge) {
         $displayStatus = 'Scheduled';
     } elseif ($shouldCharge) {
