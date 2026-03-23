@@ -67,8 +67,8 @@ if (isset($_GET['api'])) {
             $mfaPending = false;
             if (file_exists("$baseDir/rivian_mfa_pending.json")) {
                 $mfa = json_decode(file_get_contents("$baseDir/rivian_mfa_pending.json"), true);
-                // MFA challenges expire after ~5 minutes
-                if ($mfa && (time() - ($mfa['created_at'] ?? 0)) < 300) {
+                // Show MFA panel for up to 10 minutes (gives time to check phone and enter code)
+                if ($mfa && (time() - ($mfa['created_at'] ?? 0)) < 600) {
                     $mfaPending = true;
                 }
             }
@@ -89,7 +89,7 @@ if (isset($_GET['api'])) {
 
         case 'submit_otp':
             $input = json_decode(file_get_contents('php://input'), true);
-            $otpCode = $input['otp_code'] ?? '';
+            $otpCode = $input['otp_code'] ?? $_POST['otp_code'] ?? $_GET['otp_code'] ?? '';
 
             if (empty($otpCode) || !file_exists("$baseDir/rivian_mfa_pending.json")) {
                 echo json_encode(['success' => false, 'error' => 'No pending MFA challenge or missing OTP code']);
@@ -97,22 +97,52 @@ if (isset($_GET['api'])) {
             }
 
             $mfa = json_decode(file_get_contents("$baseDir/rivian_mfa_pending.json"), true);
-            if (!$mfa || (time() - ($mfa['created_at'] ?? 0)) >= 300) {
-                echo json_encode(['success' => false, 'error' => 'MFA challenge expired. The daemon will request a new one on the next cycle.']);
+            if (!$mfa) {
+                echo json_encode(['success' => false, 'error' => 'Could not read MFA challenge file.']);
                 break;
             }
 
-            // Include the solar_charge.php functions to complete MFA
-            require_once "$baseDir/solar_charge.php";
-            $session = rivianCompleteMfa(
-                $mfa['email'],
-                $otpCode,
-                $mfa['otp_token'],
-                $mfa['a_sess'],
-                $mfa['csrf_token']
-            );
+            // Complete MFA inline (no require_once needed)
+            $otpPayload = json_encode([
+                'operationName' => 'LoginWithOTP',
+                'variables'     => [
+                    'email'    => $mfa['email'],
+                    'otpCode'  => $otpCode,
+                    'otpToken' => $mfa['otp_token'],
+                ],
+                'query' => 'mutation LoginWithOTP($email: String!, $otpCode: String!, $otpToken: String!) { loginWithOTP(email: $email, otpCode: $otpCode, otpToken: $otpToken) { __typename accessToken refreshToken userSessionToken } }',
+            ]);
 
-            if ($session) {
+            $ch = curl_init('https://rivian.com/api/gql/gateway/graphql');
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_POST           => true,
+                CURLOPT_POSTFIELDS     => $otpPayload,
+                CURLOPT_HTTPHEADER     => [
+                    'Content-Type: application/json',
+                    'a-sess: ' . $mfa['a_sess'],
+                    'csrf-token: ' . $mfa['csrf_token'],
+                    'apollographql-client-name: com.rivian.android.consumer',
+                ],
+                CURLOPT_TIMEOUT => 30,
+            ]);
+            $otpResp = curl_exec($ch);
+            $otpData = json_decode($otpResp, true);
+
+            $loginResult = $otpData['data']['loginWithOTP'] ?? null;
+
+            if ($loginResult && !empty($loginResult['userSessionToken'])) {
+                $session = [
+                    'a_sess'        => $mfa['a_sess'],
+                    'u_sess'        => $loginResult['userSessionToken'],
+                    'csrf_token'    => $mfa['csrf_token'],
+                    'access_token'  => $loginResult['accessToken'] ?? '',
+                    'refresh_token' => $loginResult['refreshToken'] ?? '',
+                    'created_at'    => time(),
+                ];
+                file_put_contents("$baseDir/rivian_session.json", json_encode($session, JSON_PRETTY_PRINT));
+                chmod("$baseDir/rivian_session.json", 0600);
+                unlink("$baseDir/rivian_mfa_pending.json");
                 echo json_encode(['success' => true, 'message' => 'Rivian session restored!']);
             } else {
                 echo json_encode(['success' => false, 'error' => 'Invalid OTP code. Check the code and try again.']);
@@ -773,12 +803,16 @@ async function submitOtp() {
     statusEl.textContent = 'Submitting...';
 
     try {
-        const resp = await fetch('?api=submit_otp', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ otp_code: otpCode })
-        });
-        const data = await resp.json();
+        const resp = await fetch('?api=submit_otp&otp_code=' + encodeURIComponent(otpCode));
+        const text = await resp.text();
+        let data;
+        try {
+            data = JSON.parse(text);
+        } catch (parseErr) {
+            statusEl.className = 'mfa-status error';
+            statusEl.textContent = 'Server error: ' + text.substring(0, 200);
+            return;
+        }
 
         if (data.success) {
             statusEl.className = 'mfa-status success';
@@ -793,7 +827,7 @@ async function submitOtp() {
         }
     } catch (e) {
         statusEl.className = 'mfa-status error';
-        statusEl.textContent = 'Network error. Please try again.';
+        statusEl.textContent = 'Network error: ' + e.message;
     }
 }
 
