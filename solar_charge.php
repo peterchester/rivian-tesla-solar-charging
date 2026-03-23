@@ -1038,11 +1038,32 @@ function runOnce(array $config): void
     // ---- Rivian Session (needed for vehicle state and charging schedule) ----
     $session = rivianLoadSession();
     if (!$session) {
+        // Check if there's already a pending MFA challenge. If so, don't trigger
+        // another one (which would spam the user with OTP texts). Just wait for
+        // the user to complete MFA via the dashboard or click "Resend OTP".
+        if (file_exists(MFA_FILE)) {
+            logMsg('INFO', "Rivian session expired, MFA pending. Waiting for OTP via dashboard.");
+            appendHistory([
+                'mode'          => $mode,
+                'target_amps'   => 0,
+                'charging'      => false,
+                'status'        => 'Error',
+                'charger_state' => 'unknown',
+                'solar_w'       => $liveData['solar_w'] ?? null,
+                'grid_w'        => $liveData['grid_w'] ?? null,
+                'battery_w'     => $liveData['battery_w'] ?? null,
+                'load_w'        => $liveData['load_w'] ?? null,
+                'powerwall_pct' => $liveData['battery_pct'] ?? null,
+                'rivian_pct'    => null,
+                'rivian_limit'  => null,
+            ]);
+            return;
+        }
+
         logMsg('INFO', "No valid Rivian session found, authenticating...");
         $session = rivianAuthenticate($rivConfig, false); // non-interactive, MFA goes to dashboard
         if (!$session) {
-            logMsg('ERROR', "Rivian session expired. Enter OTP code via the web dashboard or run --rivian-setup.");
-            // Still write a history point so the dashboard knows the daemon is alive
+            logMsg('ERROR', "Rivian session expired. Enter OTP code via the web dashboard.");
             appendHistory([
                 'mode'          => $mode,
                 'target_amps'   => 0,

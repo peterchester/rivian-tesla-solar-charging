@@ -149,6 +149,18 @@ if (isset($_GET['api'])) {
             }
             break;
 
+        case 'resend_otp':
+            // Delete the pending MFA file so the daemon triggers a fresh login/MFA on next cycle
+            if (file_exists("$baseDir/rivian_mfa_pending.json")) {
+                unlink("$baseDir/rivian_mfa_pending.json");
+            }
+            // Also delete the expired session to force re-auth
+            if (file_exists("$baseDir/rivian_session.json")) {
+                unlink("$baseDir/rivian_session.json");
+            }
+            echo json_encode(['success' => true, 'message' => 'OTP resend requested. A new code will be sent within 5 minutes.']);
+            break;
+
         default:
             echo json_encode(['error' => 'unknown endpoint']);
     }
@@ -469,10 +481,13 @@ canvas {
 
     <div class="mfa-panel" id="mfaPanel">
         <div class="mfa-title">🔐 Rivian Session Expired</div>
-        <div class="mfa-desc">An OTP code has been sent to your phone/email. Enter it below to restore the connection.</div>
-        <div class="mfa-input-row">
+        <div class="mfa-desc" id="mfaDesc">An OTP code has been sent to your phone/email. Enter it below to restore the connection.</div>
+        <div class="mfa-input-row" id="mfaInputRow">
             <input type="text" id="otpInput" class="mfa-input" placeholder="Enter OTP code" maxlength="10" inputmode="numeric" autocomplete="one-time-code">
             <button class="mfa-btn" onclick="submitOtp()">Submit</button>
+        </div>
+        <div class="mfa-resend" id="mfaResend" style="display:none;">
+            <button class="mfa-btn" onclick="resendOtp()" style="background:var(--surface-2); color:var(--text); border:1px solid var(--border);">Resend OTP Code</button>
         </div>
         <div class="mfa-status" id="mfaStatus"></div>
     </div>
@@ -776,9 +791,22 @@ async function checkMfa() {
         const resp = await fetch('?api=mfa_status');
         const data = await resp.json();
         const panel = document.getElementById('mfaPanel');
+        const inputRow = document.getElementById('mfaInputRow');
+        const resendRow = document.getElementById('mfaResend');
+        const desc = document.getElementById('mfaDesc');
 
         if (data.mfa_pending) {
             panel.classList.add('visible');
+            // Show input field for fresh challenges, resend button for expired ones
+            inputRow.style.display = 'flex';
+            resendRow.style.display = 'none';
+            desc.textContent = 'An OTP code has been sent to your phone/email. Enter it below to restore the connection.';
+        } else if (!data.session_valid) {
+            // Session expired but no pending MFA (challenge expired or not yet triggered)
+            panel.classList.add('visible');
+            inputRow.style.display = 'none';
+            resendRow.style.display = 'block';
+            desc.textContent = 'Rivian session has expired. Click below to request a new OTP code.';
         } else {
             panel.classList.remove('visible');
             document.getElementById('mfaStatus').textContent = '';
@@ -786,6 +814,30 @@ async function checkMfa() {
         }
     } catch (e) {
         console.error('MFA check error:', e);
+    }
+}
+
+async function resendOtp() {
+    const statusEl = document.getElementById('mfaStatus');
+    statusEl.className = 'mfa-status';
+    statusEl.textContent = 'Requesting new OTP...';
+
+    try {
+        const resp = await fetch('?api=resend_otp');
+        const data = await resp.json();
+
+        if (data.success) {
+            statusEl.className = 'mfa-status success';
+            statusEl.textContent = data.message;
+            // After a short delay, refresh to pick up the new MFA challenge
+            setTimeout(() => checkMfa(), 10000);
+        } else {
+            statusEl.className = 'mfa-status error';
+            statusEl.textContent = data.error || 'Failed to request new OTP.';
+        }
+    } catch (e) {
+        statusEl.className = 'mfa-status error';
+        statusEl.textContent = 'Network error: ' + e.message;
     }
 }
 
