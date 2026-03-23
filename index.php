@@ -59,15 +59,21 @@ if (isset($_GET['api'])) {
                 'mode'       => $newMode,
                 'changed_at' => time(),
             ], JSON_PRETTY_PRINT));
-            // Try to run the script immediately so the mode change takes effect now
-            $executed = false;
-            if (function_exists('exec')) {
-                $phpBin = PHP_BINARY ?: '/usr/local/bin/php';
-                $script = escapeshellarg("$baseDir/solar_charge.php");
-                exec("$phpBin $script > /dev/null 2>&1 &");
-                $executed = true;
-            }
-            echo json_encode(['success' => true, 'mode' => $newMode, 'executed' => $executed]);
+            echo json_encode(['success' => true, 'mode' => $newMode]);
+            break;
+
+        case 'run_once':
+            // Execute the solar charge script inline via CLI
+            $phpBin = '/usr/local/bin/php';
+            $script = escapeshellarg("$baseDir/solar_charge.php");
+            $output = [];
+            $exitCode = 0;
+            exec("$phpBin $script 2>&1", $output, $exitCode);
+            echo json_encode([
+                'success'   => $exitCode === 0,
+                'exit_code' => $exitCode,
+                'output'    => implode("\n", array_slice($output, -10)),
+            ]);
             break;
 
         case 'mfa_status':
@@ -781,17 +787,24 @@ function updateCharts(history) {
 }
 
 async function setMode(mode) {
+    // Disable buttons while processing
+    document.querySelectorAll('.mode-btn').forEach(btn => btn.disabled = true);
+    document.getElementById('chargeStatus').textContent = 'Updating...';
+
     try {
+        // Step 1: Set the mode
         await fetch('?api=set_mode&mode=' + encodeURIComponent(mode));
-        // Immediate refresh to show mode change
-        fetchStatus();
-        // Second refresh after script finishes executing (~5s)
-        setTimeout(fetchStatus, 5000);
-        // Third refresh in case the script took longer
-        setTimeout(fetchStatus, 15000);
+
+        // Step 2: Run the script (waits for it to complete)
+        await fetch('?api=run_once');
+
+        // Step 3: Refresh the dashboard with new data
+        await fetchStatus();
     } catch (e) {
         console.error('Mode set error:', e);
     }
+
+    document.querySelectorAll('.mode-btn').forEach(btn => btn.disabled = false);
 }
 
 async function checkMfa() {
