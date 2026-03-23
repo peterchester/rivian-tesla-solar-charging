@@ -369,7 +369,7 @@ canvas {
     <div class="last-update" id="lastUpdate">Loading...</div>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.7/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>
 let powerChart, chargeChart;
 
