@@ -353,7 +353,7 @@ canvas {
         <div class="legend">
             <div class="legend-item"><div class="legend-dot" style="background:var(--solar)"></div> Solar</div>
             <div class="legend-item"><div class="legend-dot" style="background:var(--home)"></div> Home</div>
-            <div class="legend-item"><div class="legend-dot" style="background:var(--battery-rv)"></div> Vehicle</div>
+            <div class="legend-item"><div class="legend-dot" style="background:var(--battery-rv)"></div>  Rivian</div>
             <div class="legend-item"><div class="legend-dot" style="background:var(--grid)"></div> Grid</div>
             <div class="legend-item"><div class="legend-dot" style="background:var(--battery-pw)"></div> Powerwall</div>
         </div>
@@ -469,7 +469,7 @@ async function fetchStatus() {
         } else if (isActiveCharge) {
             document.getElementById('chargeAmps').textContent = currentAmps + 'A / ' + (currentAmps * 240) + 'W';
         } else if (isUnplugged) {
-            document.getElementById('chargeAmps').textContent = 'Vehicle disconnected';
+            document.getElementById('chargeAmps').textContent = 'Rivian disconnected';
         } else if (isComplete) {
             document.getElementById('chargeAmps').textContent = 'Reached charge limit';
         } else if (displayStatus === 'Scheduled') {
@@ -543,7 +543,7 @@ function updateCharts(history) {
                 const vehicleW = h.charging ? (h.target_amps ?? 0) * 240 : 0;
                 return Math.max(0, load - vehicleW) / 1000;
             }), borderColor: '#9f7aea', backgroundColor: 'transparent', tension: 0.3, pointRadius: 0, borderWidth: 2 },
-            { label: 'Vehicle', data: data.map(h => {
+            { label: 'Rivian', data: data.map(h => {
                 return h.charging ? ((h.target_amps ?? 0) * 240) / 1000 : 0;
             }), borderColor: '#4299e1', backgroundColor: 'rgba(66,153,225,0.08)', fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2 },
             { label: 'Grid', data: data.map(h => (h.grid_w ?? 0) / 1000), borderColor: '#e53e3e', backgroundColor: 'transparent', tension: 0.3, pointRadius: 0, borderWidth: 1.5, borderDash: [4,4] },
