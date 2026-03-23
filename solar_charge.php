@@ -1042,6 +1042,21 @@ function runOnce(array $config): void
         $session = rivianAuthenticate($rivConfig, false); // non-interactive, MFA goes to dashboard
         if (!$session) {
             logMsg('ERROR', "Rivian session expired. Enter OTP code via the web dashboard or run --rivian-setup.");
+            // Still write a history point so the dashboard knows the daemon is alive
+            appendHistory([
+                'mode'          => $mode,
+                'target_amps'   => 0,
+                'charging'      => false,
+                'status'        => 'Error',
+                'charger_state' => 'unknown',
+                'solar_w'       => $liveData['solar_w'] ?? null,
+                'grid_w'        => $liveData['grid_w'] ?? null,
+                'battery_w'     => $liveData['battery_w'] ?? null,
+                'load_w'        => $liveData['load_w'] ?? null,
+                'powerwall_pct' => $liveData['battery_pct'] ?? null,
+                'rivian_pct'    => null,
+                'rivian_limit'  => null,
+            ]);
             return;
         }
     }
@@ -1105,6 +1120,14 @@ function runOnce(array $config): void
         // Solar mode: calculate from surplus
         if (!$liveData) {
             logMsg('ERROR', "Cannot read Tesla energy data, skipping this cycle");
+            appendHistory([
+                'mode' => $mode, 'target_amps' => 0, 'charging' => false,
+                'status' => 'Error', 'charger_state' => $vehicleBattery['charger_state'] ?? 'unknown',
+                'solar_w' => null, 'grid_w' => null, 'battery_w' => null, 'load_w' => null,
+                'powerwall_pct' => null,
+                'rivian_pct' => $vehicleBattery['battery_level'] ?? null,
+                'rivian_limit' => $vehicleBattery['battery_limit'] ?? null,
+            ]);
             return;
         }
 
