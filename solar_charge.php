@@ -1033,7 +1033,12 @@ function runOnce(array $config): void
         $batterySoe = $liveData['battery_pct'];
 
         $priorState = loadChargeState();
-        $currentAmps = $priorState['charging_enabled'] ? $priorState['last_amps'] : 0;
+        // Only count current charging power if the vehicle is actually actively charging.
+        // charger_state of "charging_active" confirms the truck is drawing power.
+        // Without this check, disconnecting the truck leaves phantom "recycled" watts.
+        $isActuallyCharging = isset($vehicleBattery['charger_state'])
+            && $vehicleBattery['charger_state'] === 'charging_active';
+        $currentAmps = ($priorState['charging_enabled'] && $isActuallyCharging) ? $priorState['last_amps'] : 0;
         $targetAmps = calculateTargetAmps($meters, $batterySoe, $chgConfig, $currentAmps);
         $shouldCharge = $targetAmps > 0;
     }
