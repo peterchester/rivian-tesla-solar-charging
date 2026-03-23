@@ -1071,18 +1071,40 @@ function runOnce(array $config): void
         $shouldCharge = $targetAmps > 0;
     }
 
+    // ---- Determine display status ----
+    $chargerState  = $vehicleBattery['charger_state'] ?? 'unknown';
+    $chargerStatus = $vehicleBattery['charger_status'] ?? 'unknown';
+    $rivianPct     = $vehicleBattery['battery_level'] ?? null;
+    $rivianLimit   = $vehicleBattery['battery_limit'] ?? null;
+
+    if ($chargerStatus === 'chrgr_sts_not_connected') {
+        $displayStatus = 'Unplugged';
+    } elseif ($rivianPct !== null && $rivianLimit !== null && $rivianPct >= $rivianLimit) {
+        $displayStatus = 'Charge Complete';
+    } elseif ($forceFullCharge && $shouldCharge) {
+        $displayStatus = 'Override Charging';
+    } elseif ($mode === 'schedule' && !$shouldCharge) {
+        $displayStatus = 'Scheduled';
+    } elseif ($shouldCharge) {
+        $displayStatus = 'Solar Charging';
+    } else {
+        $displayStatus = 'Waiting for the Sun';
+    }
+
     // ---- Log history data point ----
     $historyPoint = [
         'mode'           => $mode,
         'target_amps'    => $targetAmps,
         'charging'       => $shouldCharge,
+        'status'         => $displayStatus,
+        'charger_state'  => $chargerState,
         'solar_w'        => $liveData['solar_w'] ?? null,
         'grid_w'         => $liveData['grid_w'] ?? null,
         'battery_w'      => $liveData['battery_w'] ?? null,
         'load_w'         => $liveData['load_w'] ?? null,
         'powerwall_pct'  => $liveData['battery_pct'] ?? null,
-        'rivian_pct'     => $vehicleBattery['battery_level'] ?? null,
-        'rivian_limit'   => $vehicleBattery['battery_limit'] ?? null,
+        'rivian_pct'     => $rivianPct,
+        'rivian_limit'   => $rivianLimit,
     ];
     appendHistory($historyPoint);
 

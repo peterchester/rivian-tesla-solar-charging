@@ -198,7 +198,8 @@ h1 .sun {
 }
 
 .card.status-charging .card-value { color: var(--charging); }
-.card.status-blocked .card-value { color: var(--blocked); }
+.card.status-blocked .card-value { color: var(--solar); }
+.card.status-unplugged .card-value { color: var(--text-dim); }
 .card.solar .card-value { color: var(--solar); }
 .card.grid-card .card-value { color: var(--grid); }
 .card.pw .card-value { color: var(--battery-pw); }
@@ -444,11 +445,33 @@ async function fetchStatus() {
         // only updates when a change is made, not on "no change needed" cycles
         const isCharging = latest.charging ?? state.charging_enabled ?? false;
         const currentAmps = latest.target_amps ?? state.last_amps ?? 0;
+        const displayStatus = latest.status ?? (isCharging ? 'Solar Charging' : 'Waiting for the Sun');
 
         const statusCard = document.getElementById('statusCard');
-        statusCard.className = 'card ' + (isCharging ? 'status-charging' : 'status-blocked');
-        document.getElementById('chargeStatus').textContent = isCharging ? 'Charging' : 'Blocked';
-        document.getElementById('chargeAmps').textContent = isCharging ? currentAmps + 'A / ' + (currentAmps * 240) + 'W' : 'Solar-only mode';
+        const isActiveCharge = ['Solar Charging', 'Override Charging'].includes(displayStatus);
+        const isWaiting = ['Waiting for the Sun', 'Scheduled'].includes(displayStatus);
+        const isComplete = displayStatus === 'Charge Complete';
+        const isUnplugged = displayStatus === 'Unplugged';
+
+        statusCard.className = 'card'
+            + (isActiveCharge ? ' status-charging' : '')
+            + (isWaiting ? ' status-blocked' : '')
+            + (isComplete ? ' pw' : '')
+            + (isUnplugged ? '' : '');
+
+        document.getElementById('chargeStatus').textContent = displayStatus;
+
+        if (isActiveCharge) {
+            document.getElementById('chargeAmps').textContent = currentAmps + 'A / ' + (currentAmps * 240) + 'W';
+        } else if (isUnplugged) {
+            document.getElementById('chargeAmps').textContent = 'Vehicle disconnected';
+        } else if (isComplete) {
+            document.getElementById('chargeAmps').textContent = 'Reached charge limit';
+        } else if (displayStatus === 'Scheduled') {
+            document.getElementById('chargeAmps').textContent = 'Waiting for off-peak window';
+        } else {
+            document.getElementById('chargeAmps').textContent = 'Monitoring solar production';
+        }
 
         // Mode toggle
         const mode = data.mode?.mode || 'solar';
