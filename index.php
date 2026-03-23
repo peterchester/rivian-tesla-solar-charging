@@ -172,7 +172,7 @@ if (isset($_GET['api'])) {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Solar Charge Controller</title>
+<title>Rivian Solar</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -225,9 +225,9 @@ h1 {
     gap: 10px;
 }
 
-h1 .sun {
-    font-size: 1.8rem;
-    filter: drop-shadow(0 0 8px var(--solar));
+h1 .logo {
+    height: 100px;
+    width: auto;
 }
 
 .mode-toggle {
@@ -467,7 +467,7 @@ canvas {
 <body>
 <div class="container">
     <header>
-        <h1><span class="sun">☀️</span> Solar Charge Controller</h1>
+        <h1><img src="assets/solar-logo.svg" alt="Rivian Solar" class="logo"> Rivian Solar</h1>
         <div>
             <div class="mode-toggle">
                 <button class="mode-btn" data-mode="solar" onclick="setMode('solar')">Solar Mode</button>
