@@ -270,26 +270,45 @@ function teslaRefreshToken(string $refreshToken): ?array
 
 /**
  * Make an authenticated request to the Tesla Owners API.
+ * Retries up to 3 times on transient errors (502, 503, 429, timeouts).
  */
 function teslaApiRequest(string $accessToken, string $endpoint): ?array
 {
     $url = TESLA_API_BASE . $endpoint;
-    $resp = httpRequest($url, 'GET', null, [
-        "Authorization: Bearer $accessToken",
-        'Content-Type: application/json',
-    ]);
+    $maxRetries = 3;
 
-    if ($resp['code'] === 401) {
-        logMsg('ERROR', "Tesla API returned 401. Token may be invalid. Try running --tesla-setup.");
-        return null;
+    for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
+        $resp = httpRequest($url, 'GET', null, [
+            "Authorization: Bearer $accessToken",
+            'Content-Type: application/json',
+        ]);
+
+        if ($resp['code'] === 401) {
+            logMsg('ERROR', "Tesla API returned 401. Token may be invalid. Try running --tesla-setup.");
+            return null;
+        }
+
+        // Transient errors: retry after a short delay
+        if (in_array($resp['code'], [0, 429, 500, 502, 503, 504])) {
+            $delay = $attempt * 10;
+            if ($attempt < $maxRetries) {
+                logMsg('INFO', "Tesla API returned HTTP {$resp['code']}, retrying in {$delay}s (attempt $attempt/$maxRetries)");
+                sleep($delay);
+                continue;
+            }
+            logMsg('ERROR', "Tesla API request failed after $maxRetries attempts (HTTP {$resp['code']}): {$resp['body']}");
+            return null;
+        }
+
+        if ($resp['code'] !== 200) {
+            logMsg('ERROR', "Tesla API request failed (HTTP {$resp['code']}): {$resp['body']}");
+            return null;
+        }
+
+        return json_decode($resp['body'], true);
     }
 
-    if ($resp['code'] !== 200) {
-        logMsg('ERROR', "Tesla API request failed (HTTP {$resp['code']}): {$resp['body']}");
-        return null;
-    }
-
-    return json_decode($resp['body'], true);
+    return null;
 }
 
 /**
@@ -954,6 +973,15 @@ function runOnce(array $config): void
     }
     if ($teslaToken) {
         $liveData = teslaGetLiveStatus($teslaToken['access_token'], $teslaConfig['site_id']);
+
+        // If failed, try refreshing the token and retrying once
+        if (!$liveData) {
+            logMsg('INFO', "Tesla API call failed, attempting token refresh...");
+            $teslaToken = teslaRefreshToken($teslaToken['refresh_token'] ?? $teslaConfig['refresh_token']);
+            if ($teslaToken) {
+                $liveData = teslaGetLiveStatus($teslaToken['access_token'], $teslaConfig['site_id']);
+            }
+        }
     }
 
     // ---- Rivian Session (needed for vehicle state and charging schedule) ----
