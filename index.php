@@ -789,11 +789,13 @@ function updateCharts(history) {
             { label: 'Solar', data: data.map(h => (h.solar_w ?? 0) / 1000), borderColor: '#f6ad35', backgroundColor: 'rgba(246,173,53,0.1)', fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2 },
             { label: 'Home', data: data.map(h => {
                 const load = h.load_w ?? 0;
-                const vehicleW = h.charging ? (h.target_amps ?? 0) * 240 : 0;
+                const actuallyCharging = h.charger_state === 'charging_active';
+                const vehicleW = actuallyCharging ? (h.target_amps ?? 0) * 240 : 0;
                 return Math.max(0, load - vehicleW) / 1000;
             }), borderColor: '#9f7aea', backgroundColor: 'transparent', tension: 0.3, pointRadius: 0, borderWidth: 2 },
             { label: 'Rivian', data: data.map(h => {
-                return h.charging ? ((h.target_amps ?? 0) * 240) / 1000 : 0;
+                const actuallyCharging = h.charger_state === 'charging_active';
+                return actuallyCharging ? ((h.target_amps ?? 0) * 240) / 1000 : 0;
             }), borderColor: '#4299e1', backgroundColor: 'rgba(66,153,225,0.08)', fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2 },
             { label: 'Grid', data: data.map(h => (h.grid_w ?? 0) / 1000), borderColor: '#e53e3e', backgroundColor: 'transparent', tension: 0.3, pointRadius: 0, borderWidth: 1.5, borderDash: [4,4] },
             { label: 'Powerwall', data: data.map(h => (h.battery_w ?? 0) / 1000), borderColor: '#48bb78', backgroundColor: 'transparent', tension: 0.3, pointRadius: 0, borderWidth: 1.5 },
