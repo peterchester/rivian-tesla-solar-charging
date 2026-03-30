@@ -951,14 +951,11 @@ function calculateTargetAmps(array $meters, float $batterySoe, array $chargingCo
     $batteryW  = $meters['battery_w']; // negative = Powerwall is charging, positive = discharging
     $loadW     = $meters['load_w'];    // total home load including truck
 
-    // Estimate the truck's current draw and subtract it from home load
-    // to get actual household consumption
     $currentChargingW = $currentChargingAmps * CHARGER_VOLTAGE;
-    $homeOnlyW = max(0, $loadW - $currentChargingW);
 
     logMsg('INFO', sprintf(
-        "Solar: %.0fW | Grid: %.0fW | Battery: %.0fW (%.1f%%) | Home: %.0fW (house: %.0fW + truck: %.0fW)",
-        $solarW, $gridW, $batteryW, $batterySoe, $loadW, $homeOnlyW, $currentChargingW
+        "Solar: %.0fW | Grid: %.0fW | Battery: %.0fW (%.1f%%) | Home: %.0fW | Truck: %.0fW",
+        $solarW, $gridW, $batteryW, $batterySoe, $loadW, $currentChargingW
     ));
 
     // If Powerwall is below threshold, all solar goes to the battery first
@@ -971,41 +968,72 @@ function calculateTargetAmps(array $meters, float $batterySoe, array $chargingCo
         return 0;
     }
 
-    // Calculate available surplus for the truck.
+    // Calculate how much we should adjust from the current charge rate.
     //
-    // The key insight: we want to know how much solar power is available
-    // after covering the actual household usage (excluding the truck).
-    // The truck's own draw shouldn't count against the surplus since
-    // we control it and can adjust it.
+    // The grid and Powerwall tell us the ground truth about whether we have
+    // surplus or deficit RIGHT NOW, accounting for everything including
+    // the truck's current draw.
     //
-    // surplus = solar - household
+    // - Grid importing (gridW > 0): we're pulling from the grid, need to reduce
+    // - Grid exporting (gridW < 0): we're wasting solar, can increase
+    // - Powerwall discharging (batteryW > 0): Powerwall covering deficit, reduce
+    // - Powerwall charging (batteryW < 0): excess solar available, can increase
     //
-    // This naturally handles all scenarios:
-    //   - Sunny, low home use: big surplus, truck charges fast
-    //   - Cloudy: solar < home, no surplus, truck stops
-    //   - Powerwall charging: its draw is handled by the threshold check above,
-    //     and any solar beyond home use is available for the truck
-    //     (Powerwall will absorb whatever the truck doesn't use)
-    $surplusW = max(0, $solarW - $homeOnlyW);
+    // "headroom" = energy available to redirect to the truck
+    //   Positive = we can charge more
+    //   Negative = we need to charge less
 
-    logMsg('INFO', sprintf(
-        "Available surplus: %.0fW (solar %.0fW - household %.0fW)",
-        $surplusW, $solarW, $homeOnlyW
-    ));
+    // Grid export is available energy (negative gridW = exporting)
+    $gridHeadroom = $gridW < 0 ? abs($gridW) : -$gridW;
 
-    // Not enough surplus solar
-    if ($surplusW < $chargingConfig['min_solar_watts']) {
-        logMsg('INFO', "Surplus below minimum threshold ({$chargingConfig['min_solar_watts']}W)");
-        return 0;
+    // Powerwall charging energy is shareable (negative batteryW = charging)
+    $batteryHeadroom = $batteryW < 0 ? abs($batteryW) : -$batteryW;
+
+    $totalHeadroom = $gridHeadroom + $batteryHeadroom;
+
+    // Convert headroom to amps adjustment
+    $headroomAmps = (int) floor($totalHeadroom / CHARGER_VOLTAGE);
+
+    // New target = current + adjustment
+    $targetAmps = $currentChargingAmps + $headroomAmps;
+
+    // If not currently charging, calculate from scratch using solar minus load
+    if ($currentChargingAmps === 0) {
+        // Start conservatively at minimum amps if there's enough solar
+        $homeOnlyW = $loadW; // no truck draw to subtract
+        $surplusW = max(0, $solarW - $homeOnlyW);
+
+        if ($surplusW < $chargingConfig['min_solar_watts']) {
+            logMsg('INFO', sprintf(
+                "Available surplus: %.0fW (below threshold %dW)",
+                $surplusW, $chargingConfig['min_solar_watts']
+            ));
+            return 0;
+        }
+
+        // Start at min amps rather than jumping to full surplus
+        $targetAmps = $chargingConfig['min_amps'];
+        logMsg('INFO', sprintf(
+            "Starting charge at minimum %dA (surplus: %.0fW, will ramp up)",
+            $targetAmps, $surplusW
+        ));
+        return $targetAmps;
     }
 
-    // Convert watts to amps: P = V * I, so I = P / V
-    $targetAmps = (int) floor($surplusW / CHARGER_VOLTAGE);
-
     // Clamp to valid range
-    $targetAmps = max($chargingConfig['min_amps'], min($chargingConfig['max_amps'], $targetAmps));
+    $targetAmps = max(0, min($chargingConfig['max_amps'], $targetAmps));
 
-    logMsg('INFO', "Target charge rate: {$targetAmps}A ({$surplusW}W / " . CHARGER_VOLTAGE . "V)");
+    logMsg('INFO', sprintf(
+        "Headroom: %.0fW / %dA (grid: %.0fW, battery: %.0fW) → target: %dA (was %dA)",
+        $totalHeadroom, $headroomAmps, $gridHeadroom, $batteryHeadroom,
+        $targetAmps, $currentChargingAmps
+    ));
+
+    // Not enough to sustain minimum charging
+    if ($targetAmps < $chargingConfig['min_amps']) {
+        logMsg('INFO', sprintf("Target %dA below minimum %dA, stopping", $targetAmps, $chargingConfig['min_amps']));
+        return 0;
+    }
 
     return $targetAmps;
 }
