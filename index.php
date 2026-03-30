@@ -163,15 +163,97 @@ if (isset($_GET['api'])) {
             break;
 
         case 'resend_otp':
-            // Delete the pending MFA file so the daemon triggers a fresh login/MFA on next cycle
+            // Immediately trigger a fresh Rivian login to send a new OTP
             if (file_exists("$baseDir/rivian_mfa_pending.json")) {
                 unlink("$baseDir/rivian_mfa_pending.json");
             }
-            // Also delete the expired session to force re-auth
             if (file_exists("$baseDir/rivian_session.json")) {
                 unlink("$baseDir/rivian_session.json");
             }
-            echo json_encode(['success' => true, 'message' => 'OTP resend requested. A new code will be sent within 5 minutes.']);
+
+            $config = json_decode(file_get_contents("$baseDir/config.json"), true) ?? [];
+            $email = $config['rivian']['email'] ?? '';
+            $password = $config['rivian']['password'] ?? '';
+
+            if (empty($email) || empty($password)) {
+                echo json_encode(['success' => false, 'error' => 'Rivian credentials not found in config.']);
+                break;
+            }
+
+            // Step 1: Get CSRF token
+            $ch = curl_init('https://rivian.com/api/gql/gateway/graphql');
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_POST => true,
+                CURLOPT_POSTFIELDS => json_encode([
+                    'operationName' => 'CreateCSRFToken',
+                    'variables' => [],
+                    'query' => 'mutation CreateCSRFToken { createCsrfToken { __typename csrfToken appSessionToken } }',
+                ]),
+                CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+                CURLOPT_TIMEOUT => 30,
+            ]);
+            $csrfResp = json_decode(curl_exec($ch), true);
+            $csrfToken = $csrfResp['data']['createCsrfToken']['csrfToken'] ?? null;
+            $aSess = $csrfResp['data']['createCsrfToken']['appSessionToken'] ?? null;
+
+            if (!$csrfToken || !$aSess) {
+                echo json_encode(['success' => false, 'error' => 'Failed to get CSRF token from Rivian.']);
+                break;
+            }
+
+            // Step 2: Login (triggers MFA SMS)
+            $ch = curl_init('https://rivian.com/api/gql/gateway/graphql');
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_POST => true,
+                CURLOPT_POSTFIELDS => json_encode([
+                    'operationName' => 'Login',
+                    'variables' => ['email' => $email, 'password' => $password],
+                    'query' => 'mutation Login($email: String!, $password: String!) { login(email: $email, password: $password) { __typename ... on MobileLoginResponse { accessToken refreshToken userSessionToken } ... on MobileMFALoginResponse { otpToken } } }',
+                ]),
+                CURLOPT_HTTPHEADER => [
+                    'Content-Type: application/json',
+                    "a-sess: $aSess",
+                    "csrf-token: $csrfToken",
+                    'apollographql-client-name: com.rivian.android.consumer',
+                ],
+                CURLOPT_TIMEOUT => 30,
+            ]);
+            $loginResp = json_decode(curl_exec($ch), true);
+            $loginResult = $loginResp['data']['login'] ?? null;
+
+            if (!$loginResult) {
+                echo json_encode(['success' => false, 'error' => 'Rivian login failed.']);
+                break;
+            }
+
+            if (($loginResult['__typename'] ?? '') === 'MobileMFALoginResponse') {
+                // Save MFA challenge for the OTP input
+                file_put_contents("$baseDir/rivian_mfa_pending.json", json_encode([
+                    'otp_token' => $loginResult['otpToken'],
+                    'a_sess' => $aSess,
+                    'csrf_token' => $csrfToken,
+                    'email' => $email,
+                    'created_at' => time(),
+                ], JSON_PRETTY_PRINT));
+                echo json_encode(['success' => true, 'message' => 'OTP code sent! Check your phone.', 'mfa_pending' => true]);
+            } elseif (!empty($loginResult['userSessionToken'])) {
+                // No MFA needed, session restored directly
+                $session = [
+                    'a_sess' => $aSess,
+                    'u_sess' => $loginResult['userSessionToken'],
+                    'csrf_token' => $csrfToken,
+                    'access_token' => $loginResult['accessToken'] ?? '',
+                    'refresh_token' => $loginResult['refreshToken'] ?? '',
+                    'created_at' => time(),
+                ];
+                file_put_contents("$baseDir/rivian_session.json", json_encode($session, JSON_PRETTY_PRINT));
+                chmod("$baseDir/rivian_session.json", 0600);
+                echo json_encode(['success' => true, 'message' => 'Rivian session restored without MFA!']);
+            } else {
+                echo json_encode(['success' => false, 'error' => 'Unexpected login response.']);
+            }
             break;
 
         default:
@@ -921,8 +1003,21 @@ async function resendOtp() {
         if (data.success) {
             statusEl.className = 'mfa-status success';
             statusEl.textContent = data.message;
-            // After a short delay, refresh to pick up the new MFA challenge
-            setTimeout(() => checkMfa(), 10000);
+
+            if (data.mfa_pending) {
+                // SMS sent, show the OTP input immediately
+                document.getElementById('mfaInputRow').style.display = 'flex';
+                document.getElementById('mfaResend').style.display = 'none';
+                document.getElementById('mfaDesc').textContent = 'An OTP code has been sent to your phone/email. Enter it below to restore the connection.';
+                document.getElementById('otpInput').value = '';
+                document.getElementById('otpInput').focus();
+            } else {
+                // Session restored without MFA
+                setTimeout(() => {
+                    document.getElementById('mfaPanel').classList.remove('visible');
+                    fetchStatus();
+                }, 2000);
+            }
         } else {
             statusEl.className = 'mfa-status error';
             statusEl.textContent = data.error || 'Failed to request new OTP.';
