@@ -16,6 +16,9 @@ solar_charge_stderr.log
 solar_charge_cron.log
 *.log
 
+# Claude MD Files
+claude/
+
 # macOS
 .DS_Store
 
