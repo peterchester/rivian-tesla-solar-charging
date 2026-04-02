@@ -780,17 +780,21 @@ async function fetchStatus() {
         const isComplete = displayStatus === 'Charge Complete';
         const isUnplugged = displayStatus === 'Unplugged';
         const isError = displayStatus === 'Error';
+        const isAway = displayStatus === 'Away';
 
         statusCard.className = 'card'
             + (isActiveCharge ? ' status-charging' : '')
             + (isWaiting ? ' status-blocked' : '')
             + (isComplete ? ' pw' : '')
-            + (isError ? ' status-error' : '');
+            + (isError ? ' status-error' : '')
+            + (isAway ? ' rv' : '');
 
         document.getElementById('chargeStatus').textContent = displayStatus;
 
         if (isError) {
             document.getElementById('chargeAmps').textContent = 'Cannot reach Rivian API';
+        } else if (isAway) {
+            document.getElementById('chargeAmps').textContent = 'Truck is away from home';
         } else if (isActiveCharge) {
             document.getElementById('chargeAmps').textContent = currentAmps + 'A / ' + (currentAmps * 240) + 'W';
         } else if (isUnplugged) {

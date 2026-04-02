@@ -1153,6 +1153,38 @@ function runOnce(array $config): void
         logMsg('INFO', "Could not fetch Rivian battery state, proceeding with current mode logic");
     }
 
+    // ---- Check if truck is away from home ----
+    // When the truck is away (e.g. at a Supercharger or destination charger),
+    // the API reports charger_state=unknown and/or battery=0%. In this case
+    // we should not set any charging schedule, as it could interfere with
+    // DC fast charging or destination charging.
+    $chargerState = $vehicleBattery['charger_state'] ?? 'unknown';
+    $rivBatteryLevel = $vehicleBattery['battery_level'] ?? null;
+    $isAwayFromHome = ($chargerState === 'unknown') ||
+                      ($rivBatteryLevel !== null && $rivBatteryLevel == 0);
+
+    if ($isAwayFromHome) {
+        logMsg('INFO', "Truck appears to be away from home (charger=$chargerState, battery=" .
+            ($rivBatteryLevel !== null ? "{$rivBatteryLevel}%" : 'unknown') .
+            "). Skipping all charging logic.");
+
+        appendHistory([
+            'mode'          => $mode,
+            'target_amps'   => 0,
+            'charging'      => false,
+            'status'        => 'Away',
+            'charger_state' => $chargerState,
+            'solar_w'       => $liveData['solar_w'] ?? null,
+            'grid_w'        => $liveData['grid_w'] ?? null,
+            'battery_w'     => $liveData['battery_w'] ?? null,
+            'load_w'        => $liveData['load_w'] ?? null,
+            'powerwall_pct' => $liveData['battery_pct'] ?? null,
+            'rivian_pct'    => $rivBatteryLevel,
+            'rivian_limit'  => $vehicleBattery['battery_limit'] ?? null,
+        ]);
+        return;
+    }
+
     // ---- Determine target amps based on mode and overrides ----
     if ($forceFullCharge) {
         // Overrides always win regardless of mode
