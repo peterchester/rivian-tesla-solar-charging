@@ -17,6 +17,8 @@ solar_charge_cron.log
 *.log
 
 # Claude MD Files
+CLAUDE.md
+.claude/
 claude/
 
 # macOS
