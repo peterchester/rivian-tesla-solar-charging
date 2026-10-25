@@ -72,6 +72,11 @@ const MFA_FILE       = __DIR__ . '/rivian_mfa_pending.json';
 
 const RIVIAN_GQL_URL      = 'https://rivian.com/api/gql/gateway/graphql';
 const RIVIAN_CHRG_GQL_URL = 'https://rivian.com/api/gql/chrg/user/graphql';
+// Endpoint used for the silent token-renewal (loginWithToken) flow.
+const RIVIAN_ORDERS_GQL_URL = 'https://rivian.com/api/gql/orders/graphql/';
+// Default Rivian mobile client id used by loginWithToken. Can be overridden
+// via config.json rivian.client_id if Rivian changes it.
+const RIVIAN_DEFAULT_CLIENT_ID = 'rivian.mobile.sc12bjxe8lmhkul';
 const TESLA_API_BASE      = 'https://owner-api.teslamotors.com';
 const TESLA_AUTH_URL      = 'https://auth.tesla.com';
 
@@ -481,10 +486,16 @@ function rivianLoadSession(): ?array
     if (!$data || empty($data['u_sess'])) {
         return null;
     }
-    // Check if session is expired (sessions last about 7 days)
-    if (isset($data['created_at']) && (time() - $data['created_at']) > 86400 * 6) {
-        logMsg('INFO', "Rivian session expired, re-authentication needed");
-        return null;
+    // Note: we intentionally do NOT expire the session on a timer here.
+    // The Rivian user session (u-sess) lives much longer than a fixed window,
+    // and discarding it early forces a full password re-login, which triggers
+    // a new MFA/OTP prompt. Instead we keep using the saved session until an
+    // API call actually fails with an auth error, at which point we attempt a
+    // silent token renewal (and only then fall back to OTP). See
+    // rivianRenewSession() and the auth-failure handling in the main run loop.
+    if (isset($data['created_at'])) {
+        $ageDays = (time() - $data['created_at']) / 86400;
+        logMsg('INFO', sprintf("Rivian session loaded (age %.1f days)", $ageDays));
     }
     return $data;
 }
@@ -496,8 +507,47 @@ function rivianSaveSession(array $session): void
     chmod(SESSION_FILE, 0600);
 }
 
-function rivianGraphQL(array $session, array $payload): ?array
+/**
+ * Decide whether a Rivian HTTP response represents an authentication failure
+ * (expired/invalid session) as opposed to a transient error. On an auth
+ * failure we want to renew the session; on a transient error (503, timeout,
+ * schema change) we must NOT, because that would needlessly trigger OTP.
+ */
+function rivianIsAuthFailure(array $resp): bool
 {
+    // Hard auth rejections.
+    if (in_array($resp['code'], [401, 403], true)) {
+        return true;
+    }
+
+    $body = strtolower($resp['body'] ?? '');
+    if ($body === '') {
+        return false;
+    }
+
+    // GraphQL surfaces auth problems as errors with an extensions code and/or
+    // a message, usually still under an HTTP 200 or 400.
+    foreach (['unauthenticated', 'unauthorized', 'session_expired', 'session expired',
+              'invalid session', 'not authenticated', 'token expired', 'invalid token'] as $needle) {
+        if (strpos($body, $needle) !== false) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * Make an authenticated GraphQL request to the Rivian gateway.
+ *
+ * If $authFailed is passed by reference it is set to true when the request
+ * failed specifically because the session is no longer valid, so the caller
+ * can attempt a renewal instead of treating it as a transient error.
+ */
+function rivianGraphQL(array $session, array $payload, ?bool &$authFailed = null): ?array
+{
+    $authFailed = false;
+
     $headers = [
         'Content-Type: application/json',
         "a-sess: {$session['a_sess']}",
@@ -509,11 +559,19 @@ function rivianGraphQL(array $session, array $payload): ?array
     $resp = httpRequest(RIVIAN_GQL_URL, 'POST', json_encode($payload), $headers);
 
     if ($resp['code'] !== 200) {
+        $authFailed = rivianIsAuthFailure($resp);
         logMsg('ERROR', "Rivian GraphQL request failed (HTTP {$resp['code']}): {$resp['body']}");
         return null;
     }
 
-    return json_decode($resp['body'], true);
+    $data = json_decode($resp['body'], true);
+
+    // A 200 can still carry a GraphQL-level auth error in the body.
+    if (isset($data['errors']) && rivianIsAuthFailure($resp)) {
+        $authFailed = true;
+    }
+
+    return $data;
 }
 
 /**
@@ -664,6 +722,124 @@ function rivianCompleteMfa(string $email, string $otpCode, string $otpToken, str
     logMsg('INFO', "Rivian MFA authentication successful, session saved");
 
     return $session;
+}
+
+/**
+ * Attempt to silently renew the Rivian session WITHOUT re-login / OTP.
+ *
+ * Uses the stored OAuth-style credential tokens (accessToken + refreshToken,
+ * captured at login/MFA time) with the loginWithToken mutation. Because this
+ * authenticates with tokens rather than the password, it does not trigger a
+ * new MFA challenge. It returns a fresh a-sess / u-sess pair in the response
+ * headers, which replaces the expired session.
+ *
+ * Returns the renewed (and saved) session on success, or null on any failure
+ * so the caller can fall back to a full OTP re-authentication.
+ *
+ * NOTE: this path relies on Rivian's unofficial loginWithToken behavior and
+ * the mobile client id; if either changes, renewal simply fails and we fall
+ * back to OTP (no worse than before).
+ */
+function rivianRenewSession(array $rivConfig, array $oldSession): ?array
+{
+    $accessToken  = $oldSession['access_token'] ?? '';
+    $refreshToken = $oldSession['refresh_token'] ?? '';
+
+    if (empty($accessToken) || empty($refreshToken)) {
+        logMsg('INFO', "Cannot renew Rivian session: no stored access/refresh token. Re-auth required.");
+        return null;
+    }
+
+    $clientId = $rivConfig['client_id'] ?? RIVIAN_DEFAULT_CLIENT_ID;
+    // dc-cid is a device/correlation id; a random mobile-style id is accepted.
+    $dcCid = $rivConfig['dc_cid'] ?? ('m-ios-' . bin2hex(random_bytes(16)));
+
+    // Step 1: fresh CSRF token (no auth required).
+    $csrfPayload = [
+        'operationName' => 'CreateCSRFToken',
+        'variables'     => [],
+        'query'         => 'mutation CreateCSRFToken { createCsrfToken { __typename csrfToken appSessionToken } }',
+    ];
+    $csrfResp = httpRequest(RIVIAN_ORDERS_GQL_URL, 'POST', json_encode($csrfPayload), [
+        'Content-Type: application/json',
+        "dc-cid: $dcCid",
+    ]);
+    if ($csrfResp['code'] !== 200) {
+        logMsg('ERROR', "Rivian renew: CSRF request failed (HTTP {$csrfResp['code']})");
+        return null;
+    }
+    $csrfData  = json_decode($csrfResp['body'], true);
+    $csrfToken = $csrfData['data']['createCsrfToken']['csrfToken'] ?? null;
+    if (!$csrfToken) {
+        logMsg('ERROR', "Rivian renew: no CSRF token in response");
+        return null;
+    }
+
+    // Step 2: exchange stored tokens for a fresh session via loginWithToken.
+    $tokenPayload = [
+        'operationName' => 'loginWithToken',
+        'variables'     => [
+            'tokens' => [
+                'clientId'     => $clientId,
+                'accessToken'  => $accessToken,
+                'refreshToken' => $refreshToken,
+            ],
+        ],
+        'query' => 'mutation loginWithToken($tokens: CredentialTokensInput!) { loginWithToken(tokens: $tokens) { __typename userId } }',
+    ];
+    $tokenResp = httpRequest(RIVIAN_ORDERS_GQL_URL, 'POST', json_encode($tokenPayload), [
+        'Content-Type: application/json',
+        "csrf-token: $csrfToken",
+        "dc-cid: $dcCid",
+        'apollographql-client-name: com.rivian.android.consumer',
+    ]);
+
+    if ($tokenResp['code'] !== 200) {
+        logMsg('ERROR', "Rivian renew: loginWithToken failed (HTTP {$tokenResp['code']}): {$tokenResp['body']}");
+        return null;
+    }
+
+    // The fresh session tokens come back as response headers.
+    $aSess = rivianParseResponseHeader($tokenResp['headers'], 'a-sess');
+    $uSess = rivianParseResponseHeader($tokenResp['headers'], 'u-sess');
+
+    if (empty($aSess) || empty($uSess)) {
+        logMsg('ERROR', "Rivian renew: loginWithToken returned no a-sess/u-sess headers. Re-auth required.");
+        return null;
+    }
+
+    $session = [
+        'a_sess'        => $aSess,
+        'u_sess'        => $uSess,
+        'csrf_token'    => $csrfToken,
+        // loginWithToken does not return new credential tokens; keep the ones
+        // we have so we can renew again next time the session expires.
+        'access_token'  => $accessToken,
+        'refresh_token' => $refreshToken,
+    ];
+
+    rivianSaveSession($session);
+    logMsg('INFO', "Rivian session renewed silently via loginWithToken (no OTP needed)");
+
+    return $session;
+}
+
+/**
+ * Pull a single header value (case-insensitive) out of a raw curl header blob.
+ */
+function rivianParseResponseHeader(string $rawHeaders, string $name): ?string
+{
+    $name = strtolower($name);
+    foreach (preg_split('/\r?\n/', $rawHeaders) as $line) {
+        $pos = strpos($line, ':');
+        if ($pos === false) {
+            continue;
+        }
+        if (strtolower(trim(substr($line, 0, $pos))) === $name) {
+            return trim(substr($line, $pos + 1));
+        }
+    }
+    return null;
 }
 
 /**
@@ -819,7 +995,7 @@ function rivianGetLiveSession(array $session, string $vehicleId): ?array
  * Get Rivian vehicle battery level and charge limit.
  * Uses a minimal query to avoid waking the vehicle unnecessarily.
  */
-function rivianGetVehicleBattery(array $session, string $vehicleId): ?array
+function rivianGetVehicleBattery(array $session, string $vehicleId, ?bool &$authFailed = null): ?array
 {
     $payload = [
         'operationName' => 'GetVehicleState',
@@ -827,7 +1003,7 @@ function rivianGetVehicleBattery(array $session, string $vehicleId): ?array
         'query'         => 'query GetVehicleState($vehicleID: String!) { vehicleState(id: $vehicleID) { __typename batteryLevel { __typename timeStamp value } batteryLimit { __typename timeStamp value } chargerState { __typename timeStamp value } chargerStatus { __typename timeStamp value } } }',
     ];
 
-    $result = rivianGraphQL($session, $payload);
+    $result = rivianGraphQL($session, $payload, $authFailed);
     $state = $result['data']['vehicleState'] ?? null;
 
     if (!$state) {
@@ -1070,6 +1246,29 @@ function runOnce(array $config): void
 
     // ---- Rivian Session (needed for vehicle state and charging schedule) ----
     $session = rivianLoadSession();
+
+    // Validate the saved session with the first authenticated call. If Rivian
+    // rejects it (session finally expired), try a silent token renewal before
+    // falling back to a full re-login (which would trigger a new OTP). The
+    // probe result is reused below so we don't fetch vehicle state twice.
+    $vehicleBattery = null;
+    if ($session) {
+        $authFailed = false;
+        $vehicleBattery = rivianGetVehicleBattery($session, $rivConfig['vehicle_id'], $authFailed);
+
+        if ($vehicleBattery === null && $authFailed) {
+            logMsg('INFO', "Rivian session rejected; attempting silent token renewal...");
+            $renewed = rivianRenewSession($rivConfig, $session);
+            if ($renewed) {
+                $session = $renewed;
+                $vehicleBattery = rivianGetVehicleBattery($session, $rivConfig['vehicle_id']);
+            } else {
+                // Silent renewal unavailable/failed → force full re-auth (OTP) below.
+                $session = null;
+            }
+        }
+    }
+
     if (!$session) {
         // Check if there's already a pending MFA challenge. If so, don't trigger
         // another one (which would spam the user with OTP texts). Just wait for
@@ -1116,7 +1315,11 @@ function runOnce(array $config): void
     }
 
     // ---- Check Rivian vehicle battery state ----
-    $vehicleBattery = rivianGetVehicleBattery($session, $rivConfig['vehicle_id']);
+    // Reuse the probe/renewal result from above; only fetch here if we just
+    // completed a full re-authentication and don't have it yet.
+    if ($vehicleBattery === null) {
+        $vehicleBattery = rivianGetVehicleBattery($session, $rivConfig['vehicle_id']);
+    }
     $forceFullCharge = false;
     $forceReason = '';
 
