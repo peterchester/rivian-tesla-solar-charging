@@ -423,6 +423,9 @@ h1 .logo {
 canvas {
     width: 100% !important;
     height: 300px !important;
+    /* Let one-finger vertical swipes scroll the page, while horizontal drags
+       and two-finger pinch are delivered to the chart for pan/zoom. */
+    touch-action: pan-y;
 }
 
 .legend {
@@ -480,13 +483,6 @@ canvas {
 
 .range-btn:hover:not(.active) {
     color: var(--text);
-}
-
-.reset-btn {
-    color: var(--accent);
-    margin-left: 4px;
-    border-left: 1px solid var(--border);
-    border-radius: 0 7px 7px 0;
 }
 
 .chart-hint {
@@ -683,9 +679,8 @@ canvas {
         <button class="range-btn" data-hours="12" onclick="setTimeRange(12)">12h</button>
         <button class="range-btn" data-hours="24" onclick="setTimeRange(24)">24h</button>
         <button class="range-btn" data-hours="168" onclick="setTimeRange(168)">1wk</button>
-        <button class="range-btn reset-btn" onclick="resetZoom()" title="Reset to live view">⟲ Reset</button>
     </div>
-    <div class="chart-hint">Drag to scroll back in time · scroll or pinch to zoom · 7 days of history</div>
+    <div class="chart-hint">Drag to scroll back · pinch or Ctrl+scroll to zoom · tap a range to reset · 7 days</div>
 
     <div class="chart-section">
         <h2>Power Flow</h2>
@@ -748,7 +743,11 @@ function zoomConfig() {
     return {
         pan: { enabled: true, mode: 'x', onPanComplete: () => { liveFollow = false; } },
         zoom: {
-            wheel: { enabled: true },
+            // Require a modifier so plain two-finger scrolling over the chart
+            // doesn't zoom. A trackpad pinch sends ctrl+wheel, so it still
+            // zooms; a mouse user holds Cmd/Ctrl. speed is lowered so it's not
+            // so twitchy. pinch is the touchscreen (phone) gesture.
+            wheel: { enabled: true, modifierKey: 'ctrl', speed: 0.05 },
             pinch: { enabled: true },
             mode: 'x',
             onZoomComplete: () => { liveFollow = false; },
@@ -762,19 +761,13 @@ function baseOptions() {
         responsive: true,
         maintainAspectRatio: false,
         animation: false,
-        interaction: { mode: 'index', intersect: false },
+        // No hover/tap readout: the value popup and active-point marker got in
+        // the way of pan/zoom. Disabling the tooltip and hover activation (not
+        // the whole event system) leaves the zoom plugin's drag/pan intact.
+        hover: { mode: null },
         plugins: {
             legend: { display: false },
-            tooltip: {
-                backgroundColor: '#1c2230',
-                titleColor: '#e2e8f0',
-                bodyColor: '#8892a4',
-                borderColor: '#2a3142',
-                borderWidth: 1,
-                cornerRadius: 8,
-                titleFont: { family: 'DM Sans' },
-                bodyFont: { family: 'JetBrains Mono', size: 12 },
-            },
+            tooltip: { enabled: false },
             zoom: zoomConfig(),
         },
         scales: {
@@ -1025,11 +1018,6 @@ function setTimeRange(hours) {
     applyWindow(chargeChart, win);
     if (powerChart) powerChart.update('none');
     if (chargeChart) chargeChart.update('none');
-}
-
-// Reset button: snap back to the live view for the selected range.
-function resetZoom() {
-    setTimeRange(timeRangeHours);
 }
 
 async function setMode(mode) {
