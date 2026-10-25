@@ -482,6 +482,21 @@ canvas {
     color: var(--text);
 }
 
+.reset-btn {
+    color: var(--accent);
+    margin-left: 4px;
+    border-left: 1px solid var(--border);
+    border-radius: 0 7px 7px 0;
+}
+
+.chart-hint {
+    text-align: center;
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    margin: -12px 0 20px;
+    font-family: 'JetBrains Mono', monospace;
+}
+
 .tou-info {
     font-size: 0.85rem;
     color: var(--text-dim);
@@ -668,7 +683,9 @@ canvas {
         <button class="range-btn" data-hours="12" onclick="setTimeRange(12)">12h</button>
         <button class="range-btn" data-hours="24" onclick="setTimeRange(24)">24h</button>
         <button class="range-btn" data-hours="168" onclick="setTimeRange(168)">1wk</button>
+        <button class="range-btn reset-btn" onclick="resetZoom()" title="Reset to live view">⟲ Reset</button>
     </div>
+    <div class="chart-hint">Drag to scroll back in time · scroll or pinch to zoom · 7 days of history</div>
 
     <div class="chart-section">
         <h2>Power Flow</h2>
@@ -695,40 +712,80 @@ canvas {
     <div class="last-update" id="lastUpdate">Loading...</div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<!-- Chart.js (pinned) + Luxon time adapter + pan/zoom plugin -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
 <script>
 let powerChart, chargeChart;
 let timeRangeHours = 3;
 let lastHistory = [];
 
-const chartDefaults = {
-    responsive: true,
-    maintainAspectRatio: false,
-    animation: false,
-    plugins: {
-        legend: { display: false },
-        tooltip: {
-            backgroundColor: '#1c2230',
-            titleColor: '#e2e8f0',
-            bodyColor: '#8892a4',
-            borderColor: '#2a3142',
-            borderWidth: 1,
-            cornerRadius: 8,
-            titleFont: { family: 'DM Sans' },
-            bodyFont: { family: 'JetBrains Mono', size: 12 },
-        }
-    },
-    scales: {
-        x: {
-            grid: { color: 'rgba(42,49,66,0.5)' },
-            ticks: { color: '#8892a4', font: { family: 'JetBrains Mono', size: 10 }, maxTicksLimit: 12 }
+const CHART_FONT_MONO = { family: 'JetBrains Mono', size: 10 };
+const GRID_COLOR = 'rgba(42,49,66,0.5)';
+// Don't let the wheel/pinch zoom go tighter than ~15 minutes.
+const MIN_ZOOM_RANGE_MS = 15 * 60 * 1000;
+
+// When true, each 30s refresh keeps the view pinned to the most recent
+// `timeRangeHours`. A pan or wheel/pinch zoom turns this off so the chart
+// stays where the user left it; a range button or Reset turns it back on.
+let liveFollow = true;
+
+function timeScale() {
+    return {
+        type: 'time',
+        time: {
+            tooltipFormat: 'MMM d, h:mm a',
+            displayFormats: { minute: 'h:mm a', hour: 'h a', day: 'MMM d' },
         },
-        y: {
-            grid: { color: 'rgba(42,49,66,0.5)' },
-            ticks: { color: '#8892a4', font: { family: 'JetBrains Mono', size: 10 } }
-        }
-    }
-};
+        grid: { color: GRID_COLOR },
+        ticks: { color: '#8892a4', font: CHART_FONT_MONO, maxTicksLimit: 10, autoSkip: true, maxRotation: 0 },
+    };
+}
+
+function zoomConfig() {
+    return {
+        pan: { enabled: true, mode: 'x', onPanComplete: () => { liveFollow = false; } },
+        zoom: {
+            wheel: { enabled: true },
+            pinch: { enabled: true },
+            mode: 'x',
+            onZoomComplete: () => { liveFollow = false; },
+        },
+        limits: { x: { minRange: MIN_ZOOM_RANGE_MS } },
+    };
+}
+
+function baseOptions() {
+    return {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+            legend: { display: false },
+            tooltip: {
+                backgroundColor: '#1c2230',
+                titleColor: '#e2e8f0',
+                bodyColor: '#8892a4',
+                borderColor: '#2a3142',
+                borderWidth: 1,
+                cornerRadius: 8,
+                titleFont: { family: 'DM Sans' },
+                bodyFont: { family: 'JetBrains Mono', size: 12 },
+            },
+            zoom: zoomConfig(),
+        },
+        scales: {
+            x: timeScale(),
+            y: {
+                grid: { color: GRID_COLOR },
+                ticks: { color: '#8892a4', font: CHART_FONT_MONO },
+            },
+        },
+    };
+}
 
 function formatTime(ts) {
     return new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -856,91 +913,123 @@ async function fetchStatus() {
     }
 }
 
+const AXIS_TITLE_FONT = { family: 'JetBrains Mono', size: 11 };
+
+function toXY(data, fn) {
+    return data.map(h => ({ x: h.timestamp * 1000, y: fn(h) }));
+}
+
+function powerDatasets(data) {
+    return [
+        { label: 'Solar', data: toXY(data, h => (h.solar_w ?? 0) / 1000), borderColor: '#f6ad35', backgroundColor: 'rgba(246,173,53,0.1)', fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2 },
+        { label: 'Home', data: toXY(data, h => {
+            const load = h.load_w ?? 0;
+            const actuallyCharging = h.charger_state === 'charging_active';
+            const vehicleW = actuallyCharging ? (h.target_amps ?? 0) * 240 : 0;
+            return Math.max(0, load - vehicleW) / 1000;
+        }), borderColor: '#9f7aea', backgroundColor: 'transparent', tension: 0.3, pointRadius: 0, borderWidth: 2 },
+        { label: 'Rivian', data: toXY(data, h => {
+            const actuallyCharging = h.charger_state === 'charging_active';
+            return actuallyCharging ? ((h.target_amps ?? 0) * 240) / 1000 : 0;
+        }), borderColor: '#4299e1', backgroundColor: 'rgba(66,153,225,0.08)', fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2 },
+        { label: 'Grid', data: toXY(data, h => (h.grid_w ?? 0) / 1000), borderColor: '#e53e3e', backgroundColor: 'transparent', tension: 0.3, pointRadius: 0, borderWidth: 1.5, borderDash: [4, 4] },
+        { label: 'Powerwall', data: toXY(data, h => (h.battery_w ?? 0) / 1000), borderColor: '#48bb78', backgroundColor: 'transparent', tension: 0.3, pointRadius: 0, borderWidth: 1.5 },
+    ];
+}
+
+function chargeDatasets(data) {
+    return [
+        { label: 'Charge Rate', data: toXY(data, h => h.target_amps ?? 0), borderColor: '#f6ad35', backgroundColor: 'rgba(246,173,53,0.08)', fill: true, tension: 0.1, pointRadius: 0, borderWidth: 2, yAxisID: 'y' },
+        { label: 'Rivian %', data: toXY(data, h => h.rivian_pct ?? null), borderColor: '#4299e1', backgroundColor: 'transparent', tension: 0.3, pointRadius: 0, borderWidth: 2, yAxisID: 'y1', spanGaps: true },
+        { label: 'Powerwall %', data: toXY(data, h => h.powerwall_pct ?? null), borderColor: '#48bb78', backgroundColor: 'transparent', tension: 0.3, pointRadius: 0, borderWidth: 1.5, borderDash: [4, 4], yAxisID: 'y1', spanGaps: true },
+    ];
+}
+
+function liveWindow() {
+    const now = Date.now();
+    return { min: now - timeRangeHours * 3600 * 1000, max: now };
+}
+
+function applyWindow(chart, win) {
+    if (!chart) return;
+    chart.options.scales.x.min = win.min;
+    chart.options.scales.x.max = win.max;
+}
+
 function updateCharts(history) {
-    const cutoff = Date.now() / 1000 - timeRangeHours * 3600;
-    const data = history.filter(h => h.timestamp >= cutoff);
+    // Load the full retained history (~7 days); what's visible is controlled
+    // by the x-axis window so the user can pan/zoom to any past span.
+    const data = history;
 
-    // Adjust time format based on range
-    const useDate = timeRangeHours > 24;
-    const labels = data.map(h => {
-        const d = new Date(h.timestamp * 1000);
-        if (useDate) {
-            return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        }
-        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    });
+    if (!powerChart || !chargeChart) {
+        const win0 = liveWindow();
 
-    // Adjust tick density based on range
-    const maxTicks = timeRangeHours <= 6 ? 12 : timeRangeHours <= 24 ? 12 : 14;
+        const powerOpts = baseOptions();
+        powerOpts.scales.x.min = win0.min;
+        powerOpts.scales.x.max = win0.max;
+        powerOpts.scales.y.title = { display: true, text: 'kW', color: '#8892a4', font: AXIS_TITLE_FONT };
+        powerChart = new Chart(document.getElementById('powerChart'), {
+            type: 'line', data: { datasets: powerDatasets(data) }, options: powerOpts,
+        });
 
-    // Power chart
-    const powerData = {
-        labels,
-        datasets: [
-            { label: 'Solar', data: data.map(h => (h.solar_w ?? 0) / 1000), borderColor: '#f6ad35', backgroundColor: 'rgba(246,173,53,0.1)', fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2 },
-            { label: 'Home', data: data.map(h => {
-                const load = h.load_w ?? 0;
-                const actuallyCharging = h.charger_state === 'charging_active';
-                const vehicleW = actuallyCharging ? (h.target_amps ?? 0) * 240 : 0;
-                return Math.max(0, load - vehicleW) / 1000;
-            }), borderColor: '#9f7aea', backgroundColor: 'transparent', tension: 0.3, pointRadius: 0, borderWidth: 2 },
-            { label: 'Rivian', data: data.map(h => {
-                const actuallyCharging = h.charger_state === 'charging_active';
-                return actuallyCharging ? ((h.target_amps ?? 0) * 240) / 1000 : 0;
-            }), borderColor: '#4299e1', backgroundColor: 'rgba(66,153,225,0.08)', fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2 },
-            { label: 'Grid', data: data.map(h => (h.grid_w ?? 0) / 1000), borderColor: '#e53e3e', backgroundColor: 'transparent', tension: 0.3, pointRadius: 0, borderWidth: 1.5, borderDash: [4,4] },
-            { label: 'Powerwall', data: data.map(h => (h.battery_w ?? 0) / 1000), borderColor: '#48bb78', backgroundColor: 'transparent', tension: 0.3, pointRadius: 0, borderWidth: 1.5 },
-        ]
-    };
-
-    const powerOpts = JSON.parse(JSON.stringify(chartDefaults));
-    powerOpts.scales.x.ticks.maxTicksLimit = maxTicks;
-    powerOpts.scales.y.title = { display: true, text: 'kW', color: '#8892a4', font: { family: 'JetBrains Mono', size: 11 } };
-
-    if (powerChart) {
-        powerChart.destroy();
+        const chargeOpts = baseOptions();
+        chargeOpts.scales.x.min = win0.min;
+        chargeOpts.scales.x.max = win0.max;
+        chargeOpts.scales.y = {
+            ...chargeOpts.scales.y,
+            position: 'left',
+            title: { display: true, text: 'Amps', color: '#8892a4', font: AXIS_TITLE_FONT },
+            min: 0,
+        };
+        chargeOpts.scales.y1 = {
+            position: 'right',
+            grid: { drawOnChartArea: false },
+            ticks: { color: '#8892a4', font: CHART_FONT_MONO },
+            title: { display: true, text: 'Battery %', color: '#8892a4', font: AXIS_TITLE_FONT },
+            min: 0,
+            max: 100,
+        };
+        chargeChart = new Chart(document.getElementById('chargeChart'), {
+            type: 'line', data: { datasets: chargeDatasets(data) }, options: chargeOpts,
+        });
+        return;
     }
-    powerChart = new Chart(document.getElementById('powerChart'), { type: 'line', data: powerData, options: powerOpts });
 
-    // Charge chart (dual Y axis)
-    const chargeData = {
-        labels,
-        datasets: [
-            { label: 'Charge Rate', data: data.map(h => h.target_amps ?? 0), borderColor: '#f6ad35', backgroundColor: 'rgba(246,173,53,0.08)', fill: true, tension: 0.1, pointRadius: 0, borderWidth: 2, yAxisID: 'y' },
-            { label: 'Rivian %', data: data.map(h => h.rivian_pct ?? null), borderColor: '#4299e1', backgroundColor: 'transparent', tension: 0.3, pointRadius: 0, borderWidth: 2, yAxisID: 'y1' },
-            { label: 'Powerwall %', data: data.map(h => h.powerwall_pct ?? null), borderColor: '#48bb78', backgroundColor: 'transparent', tension: 0.3, pointRadius: 0, borderWidth: 1.5, borderDash: [4,4], yAxisID: 'y1' },
-        ]
-    };
+    // Refresh data in place so the current pan/zoom survives the 30s cycle.
+    const pds = powerDatasets(data);
+    powerChart.data.datasets.forEach((ds, i) => { ds.data = pds[i].data; });
+    const cds = chargeDatasets(data);
+    chargeChart.data.datasets.forEach((ds, i) => { ds.data = cds[i].data; });
 
-    const chargeOpts = JSON.parse(JSON.stringify(chartDefaults));
-    chargeOpts.scales.x.ticks.maxTicksLimit = maxTicks;
-    chargeOpts.scales.y = {
-        ...chargeOpts.scales.y,
-        position: 'left',
-        title: { display: true, text: 'Amps', color: '#8892a4', font: { family: 'JetBrains Mono', size: 11 } },
-        min: 0
-    };
-    chargeOpts.scales.y1 = {
-        position: 'right',
-        grid: { drawOnChartArea: false },
-        ticks: { color: '#8892a4', font: { family: 'JetBrains Mono', size: 10 } },
-        title: { display: true, text: 'Battery %', color: '#8892a4', font: { family: 'JetBrains Mono', size: 11 } },
-        min: 0,
-        max: 100
-    };
-
-    if (chargeChart) {
-        chargeChart.destroy();
+    // Only slide the window forward if the user hasn't panned/zoomed away.
+    if (liveFollow) {
+        const win = liveWindow();
+        applyWindow(powerChart, win);
+        applyWindow(chargeChart, win);
     }
-    chargeChart = new Chart(document.getElementById('chargeChart'), { type: 'line', data: chargeData, options: chargeOpts });
+
+    powerChart.update('none');
+    chargeChart.update('none');
 }
 
 function setTimeRange(hours) {
     timeRangeHours = hours;
+    liveFollow = true;
     document.querySelectorAll('.range-btn').forEach(btn => {
-        btn.classList.toggle('active', parseInt(btn.dataset.hours) === hours);
+        if (btn.dataset.hours) {
+            btn.classList.toggle('active', parseInt(btn.dataset.hours) === hours);
+        }
     });
-    updateCharts(lastHistory);
+    const win = liveWindow();
+    applyWindow(powerChart, win);
+    applyWindow(chargeChart, win);
+    if (powerChart) powerChart.update('none');
+    if (chargeChart) chargeChart.update('none');
+}
+
+// Reset button: snap back to the live view for the selected range.
+function resetZoom() {
+    setTimeRange(timeRangeHours);
 }
 
 async function setMode(mode) {
